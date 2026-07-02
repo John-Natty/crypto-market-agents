@@ -1,0 +1,14 @@
+services:
+  crypto-market-agents:
+    build:
+      context: .
+    image: crypto-market-agents:local
+    environment:
+      WHATSAPP_ENABLED: "false"
+      TRADING_ENABLED: "false"
+      WITHDRAWALS_ENABLED: "false"
+      ORDER_EXECUTION_ENABLED: "false"
+      EXCHANGE_MODE: "disabled"
+    volumes:
+      - ./reports:/app/reports
+    command: ["python3", "scripts/test_full_pipeline_mock.py"]
