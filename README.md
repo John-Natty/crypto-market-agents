@@ -485,7 +485,8 @@ La CI se lance automatiquement sur :
 - `push` ;
 - `pull_request`.
 
-Elle utilise Ubuntu et Python 3.11, puis lance :
+Le job `test` utilise Ubuntu avec une matrice Python 3.11 et Python 3.12.
+Sur chaque version Python, il lance :
 
 ```bash
 python -m pip install --upgrade pip
@@ -498,6 +499,11 @@ python -m coverage run -m unittest discover -s tests
 python -m coverage report
 python3 scripts/test_full_pipeline_mock.py
 python3 scripts/test_orchestrator_mock.py
+```
+
+Le job `docker` est separe pour eviter de construire l'image plusieurs fois. Il depend du job `test` et lance :
+
+```bash
 docker build -t crypto-market-agents .
 ```
 
@@ -509,6 +515,10 @@ TRADING_ENABLED=false
 WITHDRAWALS_ENABLED=false
 ORDER_EXECUTION_ENABLED=false
 EXCHANGE_MODE=disabled
+NEWS_API_KEY=
+COINGECKO_API_KEY=
+CRYPTOPANIC_API_KEY=
+OPENAI_API_KEY=
 ```
 
 Les tests CI utilisent des mocks et ne doivent appeler aucune API externe reelle.
@@ -567,7 +577,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 
 - Orchestrateur disponible en version simple, sans scheduler ni retry avance.
 - CLI disponible en version initiale, sans sous-commandes avancees.
-- CI GitHub Actions disponible en version simple, Python 3.11 uniquement, avec lint et coverage.
+- CI GitHub Actions disponible avec matrice Python 3.11/3.12, lint et coverage.
 - Docker disponible en version simple, sans publication d'image ni registry.
 - Coverage disponible sans seuil bloquant strict.
 - Analyse sentiment simple par mots-cles.
@@ -583,7 +593,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 
 - Enrichir l'orchestrateur global.
 - Enrichir la CLI.
-- Ajouter une matrice CI multi-versions Python.
+- Ajouter d'autres versions Python a la matrice si necessaire.
 - Ajouter un seuil de couverture progressif quand la base de tests sera stabilisee.
 - Ajouter un dashboard.
 - Ajouter une meilleure analyse sentiment.
