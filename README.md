@@ -583,6 +583,19 @@ OPENAI_API_KEY=
 
 Les tests CI utilisent des mocks et ne doivent appeler aucune API externe reelle.
 
+## Securite Automatisee
+
+Le projet ajoute une securite GitHub legere :
+
+- Dependabot surveille les dependances Python declarees dans `pyproject.toml` ;
+- Dependabot surveille aussi les actions GitHub utilisees dans `.github/workflows/` ;
+- CodeQL analyse le code Python sur `push`, `pull_request` et chaque semaine ;
+- aucun secret GitHub n'est necessaire pour ces controles ;
+- la CI n'utilise aucune vraie cle API ;
+- WhatsApp, trading, withdrawals et order execution restent desactives par defaut.
+
+Les secrets doivent rester dans un fichier `.env` local et ne jamais etre commites dans Git.
+
 ## Structure Du Projet
 
 ```text
@@ -590,6 +603,8 @@ crypto-market-agents/
   README.md
   Makefile
   .env.example
+  .github/dependabot.yml
+  .github/workflows/codeql.yml
   .github/workflows/tests.yml
   .dockerignore
   Dockerfile
@@ -639,6 +654,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Orchestrateur disponible en version simple, sans scheduler ni retry avance.
 - CLI disponible en version initiale, sans sous-commandes avancees.
 - CI GitHub Actions disponible avec matrice Python 3.11/3.12, lint et coverage.
+- Securite GitHub legere avec Dependabot et CodeQL.
 - Docker disponible en version simple, sans publication d'image ni registry.
 - Coverage disponible avec seuil progressif de 80 %.
 - Analyse sentiment simple par mots-cles.
@@ -656,6 +672,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Enrichir la CLI.
 - Ajouter d'autres versions Python a la matrice si necessaire.
 - Augmenter progressivement le seuil de couverture si la base de tests continue de se stabiliser.
+- Ajouter un scan Docker avance dans une etape separee si necessaire.
 - Ajouter un dashboard.
 - Ajouter une meilleure analyse sentiment.
 - Ajouter GDELT comme fallback news.
