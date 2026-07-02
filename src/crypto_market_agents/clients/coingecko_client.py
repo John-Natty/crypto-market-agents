@@ -39,8 +39,7 @@ class CoinGeckoAPIError(CoinGeckoError):
         self.status_code = status_code
         self.body = body
         super().__init__(
-            f"CoinGecko request to {endpoint} failed with HTTP {status_code}: "
-            f"{_truncate(body)}"
+            f"CoinGecko request to {endpoint} failed with HTTP {status_code}: {_truncate(body)}"
         )
 
 
@@ -131,9 +130,7 @@ class CoinGeckoClient:
 
         payload = self._request_json("simple/price", params)
         if not isinstance(payload, dict):
-            raise CoinGeckoResponseError(
-                "CoinGecko simple price response must be an object."
-            )
+            raise CoinGeckoResponseError("CoinGecko simple price response must be an object.")
 
         return payload
 
@@ -172,13 +169,9 @@ class CoinGeckoClient:
 
         payload = self._request_json("coins/markets", params)
         if not isinstance(payload, list):
-            raise CoinGeckoResponseError(
-                "CoinGecko markets response must be a list."
-            )
+            raise CoinGeckoResponseError("CoinGecko markets response must be a list.")
         if not all(isinstance(item, dict) for item in payload):
-            raise CoinGeckoResponseError(
-                "CoinGecko markets response must contain objects."
-            )
+            raise CoinGeckoResponseError("CoinGecko markets response must contain objects.")
 
         return payload
 
@@ -200,14 +193,10 @@ class CoinGeckoClient:
                 body=_read_text(exc),
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise CoinGeckoTimeoutError(
-                f"CoinGecko request to {endpoint} timed out."
-            ) from exc
+            raise CoinGeckoTimeoutError(f"CoinGecko request to {endpoint} timed out.") from exc
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
-                raise CoinGeckoTimeoutError(
-                    f"CoinGecko request to {endpoint} timed out."
-                ) from exc
+                raise CoinGeckoTimeoutError(f"CoinGecko request to {endpoint} timed out.") from exc
             raise CoinGeckoNetworkError(
                 f"CoinGecko request to {endpoint} failed: {exc.reason}"
             ) from exc
@@ -352,9 +341,7 @@ def _read_text(response: Any) -> str:
 
 
 def _is_timeout_reason(reason: Any) -> bool:
-    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(
-        reason
-    ).lower()
+    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(reason).lower()
 
 
 def _truncate(value: str, limit: int = 500) -> str:
@@ -362,4 +349,3 @@ def _truncate(value: str, limit: int = 500) -> str:
         return value
 
     return f"{value[:limit]}..."
-

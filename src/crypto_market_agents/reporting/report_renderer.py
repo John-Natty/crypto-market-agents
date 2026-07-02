@@ -68,7 +68,9 @@ def render_final_report_markdown(final_report: FinalReport) -> str:
     else:
         lines.append("- Aucun rapport agent joint.")
 
-    lines.extend(["", "## Conclusion", final_report.conclusion, "", f"**Disclaimer:** {DISCLAIMER}", ""])
+    lines.extend(
+        ["", "## Conclusion", final_report.conclusion, "", f"**Disclaimer:** {DISCLAIMER}", ""]
+    )
 
     return "\n".join(lines)
 
@@ -93,4 +95,3 @@ def save_json_report(final_report: FinalReport, output_path: str) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_final_report_json(final_report), encoding="utf-8")
-

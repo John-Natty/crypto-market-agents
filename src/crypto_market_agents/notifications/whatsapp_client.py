@@ -90,10 +90,7 @@ class WhatsAppClient:
             enabled=_env_bool(os.getenv("WHATSAPP_ENABLED"), default=False),
             access_token=os.getenv("WHATSAPP_ACCESS_TOKEN"),
             phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID"),
-            to_number=(
-                os.getenv("WHATSAPP_TO_NUMBER")
-                or os.getenv("WHATSAPP_TO_PHONE_NUMBER")
-            ),
+            to_number=(os.getenv("WHATSAPP_TO_NUMBER") or os.getenv("WHATSAPP_TO_PHONE_NUMBER")),
             graph_api_version=(
                 os.getenv("WHATSAPP_GRAPH_API_VERSION")
                 or os.getenv("WHATSAPP_API_VERSION")
@@ -346,9 +343,7 @@ def _read_text(response: Any) -> str:
 
 
 def _is_timeout_reason(reason: Any) -> bool:
-    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(
-        reason
-    ).lower()
+    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(reason).lower()
 
 
 def _truncate(value: str, limit: int = 500) -> str:

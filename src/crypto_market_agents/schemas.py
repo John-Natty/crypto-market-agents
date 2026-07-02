@@ -313,9 +313,7 @@ class MarketAssetSnapshot:
             "total_volume": self.total_volume,
             "price_change_percentage_24h": self.price_change_percentage_24h,
             "price_change_percentage_7d": self.price_change_percentage_7d,
-            "last_updated": (
-                self.last_updated.isoformat() if self.last_updated else None
-            ),
+            "last_updated": (self.last_updated.isoformat() if self.last_updated else None),
             "data": to_jsonable(self.data),
         }
 
@@ -406,10 +404,7 @@ class AgentResult:
         """Return True when at least one risk reaches the requested threshold."""
 
         normalized_threshold = _coerce_enum(RiskLevel, threshold, "threshold")
-        return any(
-            risk_level_at_or_above(risk.level, normalized_threshold)
-            for risk in self.risks
-        )
+        return any(risk_level_at_or_above(risk.level, normalized_threshold) for risk in self.risks)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation."""
@@ -433,17 +428,12 @@ class AgentResult:
             agent_name=payload.get("agent_name", ""),
             summary=payload.get("summary", ""),
             key_findings=tuple(
-                AgentFinding.from_dict(finding)
-                for finding in payload.get("key_findings", ())
+                AgentFinding.from_dict(finding) for finding in payload.get("key_findings", ())
             ),
-            risks=tuple(
-                RiskSignal.from_dict(risk)
-                for risk in payload.get("risks", ())
-            ),
+            risks=tuple(RiskSignal.from_dict(risk) for risk in payload.get("risks", ())),
             confidence_score=payload.get("confidence_score", 0.5),
             sources=tuple(
-                SourceReference.from_dict(source)
-                for source in payload.get("sources", ())
+                SourceReference.from_dict(source) for source in payload.get("sources", ())
             ),
             generated_at=_normalize_datetime(
                 payload.get("generated_at", _utc_now()),
@@ -539,12 +529,10 @@ class AgentReport:
             risk_level=payload.get("risk_level", RiskLevel.MEDIUM),
             confidence=payload.get("confidence", 0),
             findings=tuple(
-                AgentFinding.from_dict(finding)
-                for finding in payload.get("findings", ())
+                AgentFinding.from_dict(finding) for finding in payload.get("findings", ())
             ),
             sources=tuple(
-                SourceReference.from_dict(source)
-                for source in payload.get("sources", ())
+                SourceReference.from_dict(source) for source in payload.get("sources", ())
             ),
             errors=_sequence_or_empty(payload.get("errors")),
             generated_at=_normalize_datetime(
@@ -715,8 +703,7 @@ class FinalReport:
                 payload.get("cryptos_to_watch", payload.get("assets_to_watch")),
             ),
             important_risks=tuple(
-                RiskSignal.from_dict(risk)
-                for risk in payload.get("important_risks", ())
+                RiskSignal.from_dict(risk) for risk in payload.get("important_risks", ())
             ),
             confidence_score=payload.get(
                 "confidence_score",
@@ -724,8 +711,7 @@ class FinalReport:
             ),
             conclusion=payload.get("conclusion", ""),
             agent_results=tuple(
-                AgentResult.from_dict(result)
-                for result in payload.get("agent_results", ())
+                AgentResult.from_dict(result) for result in payload.get("agent_results", ())
             ),
             contradictions=_sequence_or_empty(payload.get("contradictions")),
             sentiment=payload.get("sentiment", SentimentLabel.UNKNOWN),
@@ -737,14 +723,12 @@ class FinalReport:
             global_risk_level=payload.get("global_risk_level", RiskLevel.LOW),
             confidence=payload.get("confidence"),
             key_findings=tuple(
-                AgentFinding.from_dict(finding)
-                for finding in payload.get("key_findings", ())
+                AgentFinding.from_dict(finding) for finding in payload.get("key_findings", ())
             ),
             assets_to_watch=_sequence_or_empty(payload.get("assets_to_watch")),
             warnings=_sequence_or_empty(payload.get("warnings")),
             agent_reports=tuple(
-                AgentReport.from_dict(report)
-                for report in payload.get("agent_reports", ())
+                AgentReport.from_dict(report) for report in payload.get("agent_reports", ())
             ),
         )
 
@@ -864,9 +848,7 @@ def _normalize_object_tuple(
         elif isinstance(item, Mapping) and hasattr(expected_type, "from_dict"):
             items.append(expected_type.from_dict(item))
         else:
-            raise SchemaError(
-                f"{field_name} items must be {expected_type.__name__} instances."
-            )
+            raise SchemaError(f"{field_name} items must be {expected_type.__name__} instances.")
 
     return tuple(items)
 

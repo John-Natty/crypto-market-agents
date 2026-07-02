@@ -57,9 +57,7 @@ def validate_security_environment(env: Mapping[str, str]) -> None:
 
         for fragment in FORBIDDEN_CREDENTIAL_FRAGMENTS:
             if fragment in normalized_key:
-                raise SecurityError(
-                    f"Forbidden crypto credential variable detected: {raw_key}"
-                )
+                raise SecurityError(f"Forbidden crypto credential variable detected: {raw_key}")
 
         if key in FORBIDDEN_OPERATION_FLAGS and is_truthy(raw_value):
             raise SecurityError(f"Forbidden trading/withdrawal flag enabled: {raw_key}")
@@ -110,4 +108,3 @@ def redact_environment(env: Mapping[str, str]) -> dict[str, str]:
             redacted[key] = value
 
     return redacted
-

@@ -295,9 +295,7 @@ class FinalSynthesisAgent:
             contradictions.append("Risque prix faible mais risque news eleve.")
 
         low_confidence_reports = [
-            report.agent_name
-            for report in reports
-            if report.confidence < LOW_CONFIDENCE_THRESHOLD
+            report.agent_name for report in reports if report.confidence < LOW_CONFIDENCE_THRESHOLD
         ]
         if len(low_confidence_reports) >= 2:
             contradictions.append(
@@ -528,4 +526,3 @@ def _dedupe_text(values: Sequence[str]) -> list[str]:
             cleaned_values.append(cleaned)
 
     return cleaned_values
-

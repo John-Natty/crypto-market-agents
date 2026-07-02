@@ -9,7 +9,6 @@ import unittest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from crypto_market_agents.agents.final_synthesis_agent import FinalSynthesisAgent
 from crypto_market_agents.agents.news_sentiment_agent import NewsSentimentAgent
 from crypto_market_agents.agents.onchain_fundamental_agent import OnchainFundamentalAgent
 from crypto_market_agents.agents.price_market_agent import PriceMarketAgent
@@ -79,7 +78,12 @@ class OrchestratorTests(unittest.TestCase):
         )
 
         self.assertEqual(len(orchestrator.last_run.agent_reports), 4)
-        self.assertTrue(all(report.status is AgentStatus.SUCCESS for report in orchestrator.last_run.agent_reports))
+        self.assertTrue(
+            all(
+                report.status is AgentStatus.SUCCESS
+                for report in orchestrator.last_run.agent_reports
+            )
+        )
         self.assertGreater(final_report.confidence, 0)
         self.assertGreaterEqual(len(market_client.calls), 2)
         self.assertEqual(news_client.calls[0]["query"], "bitcoin OR ethereum")

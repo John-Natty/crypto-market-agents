@@ -87,9 +87,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
         report = VolatilityRiskAgent(client).analyze(["bitcoin"])
 
         self.assertEqual(report.risk_level, RiskLevel.HIGH)
-        self.assertTrue(
-            any(finding.title == "Mouvement brutal 1h" for finding in report.findings)
-        )
+        self.assertTrue(any(finding.title == "Mouvement brutal 1h" for finding in report.findings))
 
     def test_analyze_detects_high_24h_amplitude(self):
         client = FakeCoinGeckoClient(
@@ -113,10 +111,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
 
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
         self.assertTrue(
-            any(
-                finding.title == "Volatilite 24h elevee"
-                for finding in report.findings
-            )
+            any(finding.title == "Volatilite 24h elevee" for finding in report.findings)
         )
 
     def test_analyze_detects_extreme_7d_variation(self):
@@ -140,9 +135,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
         report = VolatilityRiskAgent(client).analyze(["ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
-        self.assertTrue(
-            any(finding.title == "Variation extreme 7j" for finding in report.findings)
-        )
+        self.assertTrue(any(finding.title == "Variation extreme 7j" for finding in report.findings))
 
     def test_analyze_returns_partial_when_fields_are_missing(self):
         client = FakeCoinGeckoClient(
@@ -213,4 +206,3 @@ def market_asset(
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -87,9 +87,7 @@ class PriceMarketAgentTests(unittest.TestCase):
         report = PriceMarketAgent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.HIGH)
-        self.assertTrue(
-            any(finding.title == "Forte hausse 24h" for finding in report.findings)
-        )
+        self.assertTrue(any(finding.title == "Forte hausse 24h" for finding in report.findings))
 
     def test_analyze_detects_strong_24h_drop(self):
         client = FakeCoinGeckoClient(
@@ -118,9 +116,7 @@ class PriceMarketAgentTests(unittest.TestCase):
         report = PriceMarketAgent(client).analyze(["solana", "ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
-        self.assertTrue(
-            any(finding.title == "Forte baisse 24h" for finding in report.findings)
-        )
+        self.assertTrue(any(finding.title == "Forte baisse 24h" for finding in report.findings))
 
     def test_analyze_returns_partial_when_fields_are_missing(self):
         client = FakeCoinGeckoClient(
@@ -183,4 +179,3 @@ def market_asset(
 
 if __name__ == "__main__":
     unittest.main()
-

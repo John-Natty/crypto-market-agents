@@ -453,4 +453,3 @@ def _content_quality(article: dict[str, Any]) -> float:
     )
     present = sum(1 for field in fields if _article_signal_text(field))
     return present / len(fields)
-

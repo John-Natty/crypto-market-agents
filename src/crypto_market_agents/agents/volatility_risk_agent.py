@@ -101,13 +101,9 @@ class VolatilityRiskAgent:
 
         missing_fields = _missing_fields_by_asset(market_data, self.important_fields)
         returned_ids = {
-            str(asset.get("id", "")).strip().lower()
-            for asset in market_data
-            if asset.get("id")
+            str(asset.get("id", "")).strip().lower() for asset in market_data if asset.get("id")
         }
-        missing_coin_ids = [
-            coin_id for coin_id in clean_coin_ids if coin_id not in returned_ids
-        ]
+        missing_coin_ids = [coin_id for coin_id in clean_coin_ids if coin_id not in returned_ids]
 
         asset_metrics = [self._asset_metrics(asset) for asset in market_data]
         findings: list[Finding] = []
@@ -170,13 +166,9 @@ class VolatilityRiskAgent:
         if volume is not None and market_cap is not None and market_cap > 0:
             volume_to_market_cap = volume / market_cap
 
-        change_1h_abs = abs(
-            _number(asset.get("price_change_percentage_1h_in_currency")) or 0
-        )
+        change_1h_abs = abs(_number(asset.get("price_change_percentage_1h_in_currency")) or 0)
         change_24h_abs = abs(_number(asset.get("price_change_percentage_24h")) or 0)
-        change_7d_abs = abs(
-            _number(asset.get("price_change_percentage_7d_in_currency")) or 0
-        )
+        change_7d_abs = abs(_number(asset.get("price_change_percentage_7d_in_currency")) or 0)
 
         return {
             "id": asset.get("id"),
@@ -286,10 +278,7 @@ class VolatilityRiskAgent:
             )
 
         volume_ratio = _number(metrics.get("volume_to_market_cap"))
-        if (
-            volume_ratio is not None
-            and volume_ratio >= self.thresholds.high_volume_to_market_cap
-        ):
+        if volume_ratio is not None and volume_ratio >= self.thresholds.high_volume_to_market_cap:
             findings.append(
                 Finding(
                     title="Volume anormalement eleve",
@@ -312,10 +301,7 @@ class VolatilityRiskAgent:
             findings.append(
                 Finding(
                     title="Donnees insuffisantes pour evaluer le risque",
-                    description=(
-                        f"{asset_id} manque de donnees importantes: "
-                        f"{', '.join(fields)}."
-                    ),
+                    description=(f"{asset_id} manque de donnees importantes: {', '.join(fields)}."),
                     impact=ImpactDirection.UNKNOWN,
                     symbols=(asset_id,),
                     confidence_score=0.40,
@@ -466,9 +452,7 @@ def _missing_fields_by_asset(
     for asset in market_data:
         asset_id = str(asset.get("id") or asset.get("symbol") or "unknown")
         missing_fields = [
-            field_name
-            for field_name in important_fields
-            if asset.get(field_name) is None
+            field_name for field_name in important_fields if asset.get(field_name) is None
         ]
         if missing_fields:
             missing[asset_id] = missing_fields

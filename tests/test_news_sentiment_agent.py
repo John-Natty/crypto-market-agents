@@ -53,10 +53,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
         self.assertEqual(report.risk_level, RiskLevel.LOW)
         self.assertEqual(report.data["sentiment"], SentimentLabel.POSITIVE.value)
         self.assertTrue(
-            any(
-                finding.title == "Actualite positive importante"
-                for finding in report.findings
-            )
+            any(finding.title == "Actualite positive importante" for finding in report.findings)
         )
         self.assertEqual(client.calls[0]["query"], "bitcoin")
 
@@ -76,10 +73,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
         self.assertEqual(report.data["sentiment"], SentimentLabel.NEGATIVE.value)
         self.assertTrue(
-            any(
-                finding.title == "Actualite negative importante"
-                for finding in report.findings
-            )
+            any(finding.title == "Actualite negative importante" for finding in report.findings)
         )
 
     def test_analyze_hack_or_exploit_articles(self):
@@ -114,10 +108,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
         self.assertEqual(report.confidence, 0.20)
         self.assertTrue(report.errors)
         self.assertTrue(
-            any(
-                finding.title == "Absence d'actualite significative"
-                for finding in report.findings
-            )
+            any(finding.title == "Absence d'actualite significative" for finding in report.findings)
         )
 
     def test_analyze_returns_failed_when_client_errors(self):

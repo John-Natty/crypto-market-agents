@@ -35,9 +35,7 @@ class WhatsAppNotifier:
     def send_final_report_summary(self, final_report: FinalReport) -> dict[str, Any]:
         """Send a short final report summary through WhatsAppClient."""
 
-        return self.client.send_text_message(
-            self.format_final_report_summary(final_report)
-        )
+        return self.client.send_text_message(self.format_final_report_summary(final_report))
 
     def send_high_risk_alert(self, final_report: FinalReport) -> dict[str, Any]:
         """Send an alert only when the final report risk is high or critical."""
@@ -69,8 +67,7 @@ class WhatsAppNotifier:
         if final_report.key_findings:
             for finding in final_report.key_findings[:MAX_SUMMARY_FINDINGS]:
                 lines.append(
-                    "- "
-                    + _shorten(f"{finding.title}: {finding.description}", FINDING_LIMIT)
+                    "- " + _shorten(f"{finding.title}: {finding.description}", FINDING_LIMIT)
                 )
         else:
             lines.append("- Aucun finding cle.")
@@ -124,4 +121,3 @@ def _shorten(value: str, limit: int) -> str:
         return cleaned
 
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
-

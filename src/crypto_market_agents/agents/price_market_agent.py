@@ -102,13 +102,9 @@ class PriceMarketAgent:
 
         analyzed_assets = [_clean_asset(asset) for asset in market_data]
         returned_ids = {
-            str(asset.get("id", "")).strip().lower()
-            for asset in market_data
-            if asset.get("id")
+            str(asset.get("id", "")).strip().lower() for asset in market_data if asset.get("id")
         }
-        missing_coin_ids = [
-            coin_id for coin_id in clean_coin_ids if coin_id not in returned_ids
-        ]
+        missing_coin_ids = [coin_id for coin_id in clean_coin_ids if coin_id not in returned_ids]
         missing_fields = _missing_fields_by_asset(
             market_data,
             self.important_fields,
@@ -198,15 +194,8 @@ class PriceMarketAgent:
                 )
             )
 
-        if (
-            change_7d is not None
-            and abs(change_7d) >= self.thresholds.important_7d_change
-        ):
-            impact = (
-                ImpactDirection.BULLISH
-                if change_7d > 0
-                else ImpactDirection.BEARISH
-            )
+        if change_7d is not None and abs(change_7d) >= self.thresholds.important_7d_change:
+            impact = ImpactDirection.BULLISH if change_7d > 0 else ImpactDirection.BEARISH
             direction = "progresse" if change_7d > 0 else "recule"
             findings.append(
                 AgentFinding(
@@ -246,8 +235,7 @@ class PriceMarketAgent:
         return AgentFinding(
             title="Volume eleve",
             description=(
-                f"{name} affiche un volume 24h eleve "
-                f"({_fmt(ratio * 100)}% de sa capitalisation)."
+                f"{name} affiche un volume 24h eleve ({_fmt(ratio * 100)}% de sa capitalisation)."
             ),
             impact=ImpactDirection.MIXED,
             symbols=(symbol,),
@@ -293,10 +281,7 @@ class PriceMarketAgent:
                 data={
                     "current_price": current_price,
                     "high_24h": high_24h,
-                    "distance_to_high_pct": (
-                        (high_24h - current_price) / high_24h
-                    )
-                    * 100,
+                    "distance_to_high_pct": ((high_24h - current_price) / high_24h) * 100,
                 },
             )
 
@@ -310,10 +295,7 @@ class PriceMarketAgent:
                 data={
                     "current_price": current_price,
                     "low_24h": low_24h,
-                    "distance_to_low_pct": (
-                        (current_price - low_24h) / low_24h
-                    )
-                    * 100,
+                    "distance_to_low_pct": ((current_price - low_24h) / low_24h) * 100,
                 },
             )
 
@@ -337,9 +319,7 @@ class PriceMarketAgent:
 
     def _asset_risk_level(self, asset: dict[str, Any]) -> RiskLevel:
         change_24h = abs(_number(asset.get("price_change_percentage_24h")) or 0)
-        change_7d = abs(
-            _number(asset.get("price_change_percentage_7d_in_currency")) or 0
-        )
+        change_7d = abs(_number(asset.get("price_change_percentage_7d_in_currency")) or 0)
 
         if (
             change_24h >= self.thresholds.extreme_24h_change
@@ -447,9 +427,7 @@ def _missing_fields_by_asset(
     for asset in market_data:
         asset_id = str(asset.get("id") or asset.get("symbol") or "unknown")
         missing_fields = [
-            field_name
-            for field_name in important_fields
-            if asset.get(field_name) is None
+            field_name for field_name in important_fields if asset.get(field_name) is None
         ]
         if missing_fields:
             missing[asset_id] = missing_fields

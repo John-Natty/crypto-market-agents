@@ -32,13 +32,9 @@ class FullAnalysisFlowTests(unittest.TestCase):
         fundamental_client = FakeFundamentalClient()
 
         price_report = PriceMarketAgent(market_client).analyze(["bitcoin", "ethereum"])
-        volatility_report = VolatilityRiskAgent(market_client).analyze(
-            ["bitcoin", "ethereum"]
-        )
+        volatility_report = VolatilityRiskAgent(market_client).analyze(["bitcoin", "ethereum"])
         news_report = NewsSentimentAgent(news_client).analyze(["bitcoin", "ethereum"])
-        onchain_report = OnchainFundamentalAgent(fundamental_client).analyze(
-            ["uniswap", "aave"]
-        )
+        onchain_report = OnchainFundamentalAgent(fundamental_client).analyze(["uniswap", "aave"])
 
         reports = (
             price_report,
@@ -93,9 +89,7 @@ class FullAnalysisFlowTests(unittest.TestCase):
             timeout_seconds=config.whatsapp.timeout_seconds,
             opener=forbidden_opener(calls),
         )
-        notification = WhatsAppNotifier(whatsapp_client).send_final_report_summary(
-            final_report
-        )
+        notification = WhatsAppNotifier(whatsapp_client).send_final_report_summary(final_report)
 
         self.assertFalse(config.whatsapp.enabled)
         self.assertFalse(notification["sent"])
@@ -154,9 +148,7 @@ class FakeNewsClient:
         self.calls = []
 
     def search_articles(self, query, language="en", page_size=10):
-        self.calls.append(
-            {"query": query, "language": language, "page_size": page_size}
-        )
+        self.calls.append({"query": query, "language": language, "page_size": page_size})
         return [
             {
                 "title": "Bitcoin adoption grows with institutional integration",

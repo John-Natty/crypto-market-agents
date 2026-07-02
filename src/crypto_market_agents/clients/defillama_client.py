@@ -38,8 +38,7 @@ class DefiLlamaAPIError(DefiLlamaError):
         self.status_code = status_code
         self.body = body
         super().__init__(
-            f"DefiLlama request to {endpoint} failed with HTTP {status_code}: "
-            f"{_truncate(body)}"
+            f"DefiLlama request to {endpoint} failed with HTTP {status_code}: {_truncate(body)}"
         )
 
 
@@ -158,14 +157,10 @@ class DefiLlamaClient:
                 body=_read_text(exc),
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise DefiLlamaTimeoutError(
-                f"DefiLlama request to {endpoint} timed out."
-            ) from exc
+            raise DefiLlamaTimeoutError(f"DefiLlama request to {endpoint} timed out.") from exc
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
-                raise DefiLlamaTimeoutError(
-                    f"DefiLlama request to {endpoint} timed out."
-                ) from exc
+                raise DefiLlamaTimeoutError(f"DefiLlama request to {endpoint} timed out.") from exc
             raise DefiLlamaNetworkError(
                 f"DefiLlama request to {endpoint} failed: {exc.reason}"
             ) from exc
@@ -177,9 +172,7 @@ class DefiLlamaClient:
                 body=body,
             )
         if not body.strip():
-            raise DefiLlamaResponseError(
-                f"DefiLlama returned an empty response for {endpoint}."
-            )
+            raise DefiLlamaResponseError(f"DefiLlama returned an empty response for {endpoint}.")
 
         try:
             return json.loads(body)
@@ -260,9 +253,7 @@ def _read_text(response: Any) -> str:
 
 
 def _is_timeout_reason(reason: Any) -> bool:
-    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(
-        reason
-    ).lower()
+    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(reason).lower()
 
 
 def _truncate(value: str, limit: int = 500) -> str:

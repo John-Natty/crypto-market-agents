@@ -42,8 +42,7 @@ class NewsAPIHTTPError(NewsError):
         self.status_code = status_code
         self.body = body
         super().__init__(
-            f"News API request to {endpoint} failed with HTTP {status_code}: "
-            f"{_truncate(body)}"
+            f"News API request to {endpoint} failed with HTTP {status_code}: {_truncate(body)}"
         )
 
 
@@ -164,12 +163,8 @@ class NewsClient:
             raise NewsTimeoutError(f"News API request to {endpoint} timed out.") from exc
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
-                raise NewsTimeoutError(
-                    f"News API request to {endpoint} timed out."
-                ) from exc
-            raise NewsNetworkError(
-                f"News API request to {endpoint} failed: {exc.reason}"
-            ) from exc
+                raise NewsTimeoutError(f"News API request to {endpoint} timed out.") from exc
+            raise NewsNetworkError(f"News API request to {endpoint} failed: {exc.reason}") from exc
 
         if status_code != 200:
             raise NewsAPIHTTPError(
@@ -181,9 +176,7 @@ class NewsClient:
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
-            raise NewsResponseError(
-                f"News API returned invalid JSON for {endpoint}."
-            ) from exc
+            raise NewsResponseError(f"News API returned invalid JSON for {endpoint}.") from exc
 
     def _build_request(self, endpoint: str, params: Mapping[str, str]) -> Request:
         clean_endpoint = _required_text(endpoint, "endpoint").lstrip("/")
@@ -289,9 +282,7 @@ def _read_text(response: Any) -> str:
 
 
 def _is_timeout_reason(reason: Any) -> bool:
-    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(
-        reason
-    ).lower()
+    return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(reason).lower()
 
 
 def _truncate(value: str, limit: int = 500) -> str:

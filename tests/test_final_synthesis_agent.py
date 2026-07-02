@@ -96,9 +96,7 @@ class FinalSynthesisAgentTests(unittest.TestCase):
         final_report = FinalSynthesisAgent().synthesize(reports)
 
         self.assertLess(final_report.confidence, 0.80)
-        self.assertTrue(
-            any("Analyse partielle" in warning for warning in final_report.warnings)
-        )
+        self.assertTrue(any("Analyse partielle" in warning for warning in final_report.warnings))
 
     def test_synthesize_failed_agent_lowers_confidence_and_adds_warning(self):
         reports = (
@@ -158,10 +156,16 @@ class FinalSynthesisAgentTests(unittest.TestCase):
             any("prix positif" in contradiction for contradiction in final_report.contradictions)
         )
         self.assertTrue(
-            any("Fondamentaux solides" in contradiction for contradiction in final_report.contradictions)
+            any(
+                "Fondamentaux solides" in contradiction
+                for contradiction in final_report.contradictions
+            )
         )
         self.assertTrue(
-            any("Risque prix faible" in contradiction for contradiction in final_report.contradictions)
+            any(
+                "Risque prix faible" in contradiction
+                for contradiction in final_report.contradictions
+            )
         )
 
     def test_synthesize_extracts_assets_to_watch(self):

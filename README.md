@@ -26,6 +26,7 @@ Le resultat principal est un `FinalReport` exploitable en Markdown, JSON et noti
 - Notification WhatsApp optionnelle, desactivee par defaut.
 - Orchestrateur global et premiere commande CLI.
 - Dockerfile et Docker Compose pour execution conteneurisee.
+- Qualite code avec Ruff et couverture de tests avec Coverage.
 - Tests unitaires et integration mockee sans Internet.
 
 ## Architecture Globale
@@ -374,6 +375,41 @@ python3 -m unittest discover -s tests
 python3 scripts/test_full_pipeline_mock.py
 ```
 
+## Qualite Code Et Coverage
+
+Installer les outils de developpement :
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Verifier le lint Ruff :
+
+```bash
+python -m ruff check src tests scripts
+```
+
+Verifier le format sans modifier les fichiers :
+
+```bash
+python -m ruff format --check src tests scripts
+```
+
+Formater les fichiers Python si necessaire :
+
+```bash
+python -m ruff format src tests scripts
+```
+
+Mesurer la couverture des tests :
+
+```bash
+python -m coverage run -m unittest discover -s tests
+python -m coverage report
+```
+
+Coverage est configure sans seuil bloquant strict pour cette premiere etape qualite.
+
 ## Docker
 
 Le projet fournit un `Dockerfile` base sur `python:3.11-slim`.
@@ -453,9 +489,13 @@ Elle utilise Ubuntu et Python 3.11, puis lance :
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 python3 -m compileall src tests scripts
+python -m ruff check src tests scripts
+python -m ruff format --check src tests scripts
 python3 -m unittest discover -s tests
+python -m coverage run -m unittest discover -s tests
+python -m coverage report
 python3 scripts/test_full_pipeline_mock.py
 python3 scripts/test_orchestrator_mock.py
 docker build -t crypto-market-agents .
@@ -527,8 +567,9 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 
 - Orchestrateur disponible en version simple, sans scheduler ni retry avance.
 - CLI disponible en version initiale, sans sous-commandes avancees.
-- CI GitHub Actions disponible en version simple, Python 3.11 uniquement.
+- CI GitHub Actions disponible en version simple, Python 3.11 uniquement, avec lint et coverage.
 - Docker disponible en version simple, sans publication d'image ni registry.
+- Coverage disponible sans seuil bloquant strict.
 - Analyse sentiment simple par mots-cles.
 - Extraction assets/protocoles rule-based.
 - Donnees live dependantes des APIs externes.
@@ -543,12 +584,12 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Enrichir l'orchestrateur global.
 - Enrichir la CLI.
 - Ajouter une matrice CI multi-versions Python.
+- Ajouter un seuil de couverture progressif quand la base de tests sera stabilisee.
 - Ajouter un dashboard.
 - Ajouter une meilleure analyse sentiment.
 - Ajouter GDELT comme fallback news.
 - Ajouter des rapports planifies.
 - Ajouter des retries et rate-limits avances.
-- Ajouter une mesure de couverture de tests.
 - Ajouter une publication d'image Docker si necessaire.
 - Ajouter des templates WhatsApp dans une etape separee.
 

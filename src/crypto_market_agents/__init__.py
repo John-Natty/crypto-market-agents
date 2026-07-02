@@ -1,2 +1,1 @@
 """Crypto Market Agents package."""
-

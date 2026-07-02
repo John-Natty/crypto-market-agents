@@ -57,9 +57,7 @@ class DefiLlamaClientTests(unittest.TestCase):
         self.assertEqual(calls[0], "/protocols")
 
     def test_non_200_response_raises_api_error(self):
-        client = DefiLlamaClient(
-            opener=self.make_opener(b'{"error":"not found"}', status=404)
-        )
+        client = DefiLlamaClient(opener=self.make_opener(b'{"error":"not found"}', status=404))
 
         with self.assertRaises(DefiLlamaAPIError) as context:
             client.get_protocol("missing")

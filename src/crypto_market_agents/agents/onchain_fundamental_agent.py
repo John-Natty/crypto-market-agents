@@ -103,16 +103,11 @@ class OnchainFundamentalAgent:
             analyses.append(analysis)
             findings.extend(self._findings_for_protocol(analysis))
             if analysis["missing_fields"]:
-                errors.append(
-                    f"Missing fields for {slug}: "
-                    f"{', '.join(analysis['missing_fields'])}"
-                )
+                errors.append(f"Missing fields for {slug}: {', '.join(analysis['missing_fields'])}")
 
         fees_overview = self._optional_call("fees overview", self.client.get_fees_overview, errors)
         stablecoins = self._optional_call("stablecoins", self.client.get_stablecoins, errors)
-        chain_data = (
-            self._selected_chain_data(selected_chains, errors) if selected_chains else []
-        )
+        chain_data = self._selected_chain_data(selected_chains, errors) if selected_chains else []
 
         if fees_overview:
             fee_findings = self._fees_findings(analyses, fees_overview)
@@ -200,8 +195,7 @@ class OnchainFundamentalAgent:
                 Finding(
                     title="TVL faible",
                     description=(
-                        f"{name} affiche une TVL inferieure a "
-                        f"{_usd(self.thresholds.low_tvl_usd)}."
+                        f"{name} affiche une TVL inferieure a {_usd(self.thresholds.low_tvl_usd)}."
                     ),
                     impact=ImpactDirection.BEARISH,
                     symbols=(slug,),
@@ -215,8 +209,7 @@ class OnchainFundamentalAgent:
                 Finding(
                     title="Baisse importante de TVL",
                     description=(
-                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% "
-                        "sur la periode disponible."
+                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% sur la periode disponible."
                     ),
                     impact=ImpactDirection.BEARISH,
                     symbols=(slug,),
@@ -229,8 +222,7 @@ class OnchainFundamentalAgent:
                 Finding(
                     title="Baisse notable de TVL",
                     description=(
-                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% "
-                        "sur la periode disponible."
+                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% sur la periode disponible."
                     ),
                     impact=ImpactDirection.BEARISH,
                     symbols=(slug,),
@@ -318,9 +310,7 @@ class OnchainFundamentalAgent:
                     }
                 )
 
-        missing = selected - {
-            str(item.get("name") or "").strip().lower() for item in results
-        }
+        missing = selected - {str(item.get("name") or "").strip().lower() for item in results}
         if missing:
             errors.append("Missing chain data for: " + ", ".join(sorted(missing)))
 
@@ -355,8 +345,7 @@ class OnchainFundamentalAgent:
             if analysis.get("current_tvl") is not None
         )
         strong_drop_count = sum(
-            (_number(analysis.get("tvl_change_pct")) or 0)
-            <= self.thresholds.strong_tvl_drop_pct
+            (_number(analysis.get("tvl_change_pct")) or 0) <= self.thresholds.strong_tvl_drop_pct
             for analysis in found
             if analysis.get("tvl_change_pct") is not None
         )
