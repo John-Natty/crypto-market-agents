@@ -2,11 +2,12 @@
 
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 PYTHON3 ?= python3
+CLI ?= $(if $(wildcard .venv/bin/crypto-market-agents),.venv/bin/crypto-market-agents,crypto-market-agents)
 PROJECT_DIRS := src tests scripts
 IMAGE_NAME := crypto-market-agents
 COVERAGE_MIN := 80
 
-.PHONY: help install test lint format format-check coverage ci-local docker-build mock orchestrator-mock clean
+.PHONY: help install test lint format format-check coverage ci-local docker-build mock orchestrator-mock cli-mock clean
 
 help:
 	@printf "Commandes disponibles:\n"
@@ -20,6 +21,7 @@ help:
 	@printf "  make docker-build      Construire l'image Docker locale\n"
 	@printf "  make mock              Lancer le pipeline mocke sans API externe\n"
 	@printf "  make orchestrator-mock Lancer l'orchestrateur mocke sans API externe\n"
+	@printf "  make cli-mock          Lancer la CLI en mode mock sans API externe\n"
 	@printf "  make clean             Supprimer les caches et artefacts locaux\n"
 
 install:
@@ -52,6 +54,7 @@ ci-local:
 	$(PYTHON) -m coverage report --fail-under=$(COVERAGE_MIN)
 	$(PYTHON3) scripts/test_full_pipeline_mock.py
 	$(PYTHON3) scripts/test_orchestrator_mock.py
+	$(PYTHON3) scripts/test_cli_mock.py
 
 docker-build:
 	docker build -t $(IMAGE_NAME) .
@@ -61,6 +64,9 @@ mock:
 
 orchestrator-mock:
 	$(PYTHON3) scripts/test_orchestrator_mock.py
+
+cli-mock:
+	$(CLI) report --mock --output-dir reports
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +

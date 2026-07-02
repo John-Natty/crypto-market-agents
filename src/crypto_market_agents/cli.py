@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from crypto_market_agents.agents.final_synthesis_agent import FinalSynthesisAgent
+from crypto_market_agents.mock_data import build_mock_agent_reports
 from crypto_market_agents.orchestrator import CryptoMarketOrchestrator
+from crypto_market_agents.reporting.report_renderer import (
+    save_json_report,
+    save_markdown_report,
+)
+from crypto_market_agents.schemas import FinalReport, RiskLevel
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not send WhatsApp notifications even if enabled in .env.",
     )
     report_parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Run a full demo with fictitious data and no external API calls.",
+    )
+    report_parser.add_argument(
+        "--mock-risk-level",
+        choices=[level.value for level in RiskLevel],
+        default=RiskLevel.MEDIUM.value,
+        help="Risk scenario for --mock, default: medium.",
+    )
+    report_parser.add_argument(
         "--env-file",
         default=None,
         help="Optional dotenv file path, default: .env.",
@@ -79,6 +99,9 @@ def main(
     args = parser.parse_args(argv)
 
     if args.command == "report":
+        if args.mock:
+            return _run_mock_report(args)
+
         orchestrator = orchestrator_factory(env_file=args.env_file)
         final_report = orchestrator.run_full_analysis(
             coin_ids=args.coins,
@@ -104,6 +127,40 @@ def main(
 
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+def _run_mock_report(args: argparse.Namespace) -> int:
+    """Generate a complete report from official fictitious mock data."""
+
+    mock_risk_level = RiskLevel(args.mock_risk_level)
+    agent_reports = build_mock_agent_reports(mock_risk_level)
+    final_report = FinalSynthesisAgent().synthesize(agent_reports)
+    markdown_path, json_path = _save_mock_reports(final_report, args.output_dir)
+
+    print("Mode: mock")
+    print(f"Rapport Markdown: {markdown_path}")
+    print(f"Rapport JSON: {json_path}")
+    print(f"Risque global: {final_report.global_risk_level.value}")
+    print(f"Confidence globale: {final_report.confidence:.2f}")
+    print("Aucune API externe appelee.")
+    print("WhatsApp: disabled (mock mode)")
+    return 0
+
+
+def _save_mock_reports(
+    final_report: FinalReport,
+    output_dir: str | Path,
+) -> tuple[Path, Path]:
+    target_dir = Path(output_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    markdown_path = target_dir / f"mock_report_{timestamp}.md"
+    json_path = target_dir / f"mock_report_{timestamp}.json"
+
+    save_markdown_report(final_report, str(markdown_path))
+    save_json_report(final_report, str(json_path))
+
+    return markdown_path, json_path
 
 
 def _notification_status(result: dict[str, Any]) -> str:

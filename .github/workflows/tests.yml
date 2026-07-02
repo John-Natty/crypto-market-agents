@@ -63,6 +63,9 @@ jobs:
       - name: Run mock orchestrator
         run: python3 scripts/test_orchestrator_mock.py
 
+      - name: Run mock CLI
+        run: python3 scripts/test_cli_mock.py
+
   docker:
     name: Docker build
     runs-on: ubuntu-latest

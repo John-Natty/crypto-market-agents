@@ -1,8 +1,12 @@
 from contextlib import redirect_stdout
 from io import StringIO
+import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +71,76 @@ class CLITests(unittest.TestCase):
         self.assertFalse(orchestrator.run_kwargs["notify_whatsapp"])
         self.assertIn("WhatsApp summary: skipped", output.getvalue())
 
+    def test_cli_report_mock_creates_reports_without_orchestrator_or_whatsapp(self):
+        factory = ExplodingFactory()
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch.dict(os.environ, {"WHATSAPP_ENABLED": "true"}):
+                exit_code, output, payload, markdown = self.run_mock_cli(
+                    output_dir,
+                    orchestrator_factory=factory,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(factory.calls, 0)
+        self.assertIn("Mode: mock", output)
+        self.assertIn("Aucune API externe appelee.", output)
+        self.assertIn("WhatsApp: disabled (mock mode)", output)
+        self.assertIn("Rapport Markdown:", output)
+        self.assertIn("Rapport JSON:", output)
+        self.assertIn("Disclaimer", markdown)
+        self.assertEqual(payload["global_risk_level"], "medium")
+        self.assertEqual(len(payload["agent_reports"]), 4)
+
+    def test_cli_report_mock_risk_level_low(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            _, output, payload, _ = self.run_mock_cli(output_dir, risk_level="low")
+
+        self.assertIn("Risque global: low", output)
+        self.assertEqual(payload["global_risk_level"], "low")
+
+    def test_cli_report_mock_risk_level_high(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            _, output, payload, _ = self.run_mock_cli(output_dir, risk_level="high")
+
+        self.assertIn("Risque global: high", output)
+        self.assertEqual(payload["global_risk_level"], "high")
+
+    def test_cli_report_mock_risk_level_critical(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            _, output, payload, _ = self.run_mock_cli(output_dir, risk_level="critical")
+
+        self.assertIn("Risque global: critical", output)
+        self.assertEqual(payload["global_risk_level"], "critical")
+
+    def run_mock_cli(
+        self,
+        output_dir,
+        *,
+        risk_level=None,
+        orchestrator_factory=None,
+    ):
+        argv = ["report", "--mock", "--output-dir", output_dir]
+        if risk_level:
+            argv.extend(["--mock-risk-level", risk_level])
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                argv,
+                orchestrator_factory=orchestrator_factory or ExplodingFactory(),
+            )
+
+        output_path = Path(output_dir)
+        markdown_files = sorted(output_path.glob("mock_report_*.md"))
+        json_files = sorted(output_path.glob("mock_report_*.json"))
+        self.assertEqual(len(markdown_files), 1)
+        self.assertEqual(len(json_files), 1)
+
+        payload = json.loads(json_files[0].read_text(encoding="utf-8"))
+        markdown = markdown_files[0].read_text(encoding="utf-8")
+        return exit_code, output.getvalue(), payload, markdown
+
 
 class RecordingFactory:
     def __init__(self):
@@ -76,6 +150,15 @@ class RecordingFactory:
         instance = FakeOrchestrator(kwargs)
         self.instances.append(instance)
         return instance
+
+
+class ExplodingFactory:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, **kwargs):
+        self.calls += 1
+        raise AssertionError("orchestrator_factory must not be called in mock mode")
 
 
 class FakeOrchestrator:

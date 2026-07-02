@@ -25,6 +25,7 @@ Le resultat principal est un `FinalReport` exploitable en Markdown, JSON et noti
 - Rendu du rapport final en Markdown et JSON.
 - Notification WhatsApp optionnelle, desactivee par defaut.
 - Orchestrateur global et premiere commande CLI.
+- Mode mock officiel pour demo complete sans API externe.
 - Dockerfile et Docker Compose pour execution conteneurisee.
 - Qualite code avec Ruff et couverture de tests avec Coverage.
 - Tests unitaires et integration mockee sans Internet.
@@ -89,6 +90,8 @@ crypto-market-agents report \
 - `--protocols` : slugs DefiLlama a analyser.
 - `--output-dir` : dossier de sauvegarde, par defaut `reports`.
 - `--no-whatsapp` : desactive WhatsApp pour cette execution.
+- `--mock` : lance une demo complete avec donnees fictives, sans API externe.
+- `--mock-risk-level` : scenario mock `low`, `medium`, `high` ou `critical`.
 - `--env-file` : chemin optionnel vers un fichier `.env`.
 
 Les rapports sont sauvegardes sous la forme :
@@ -97,6 +100,44 @@ Les rapports sont sauvegardes sous la forme :
 reports/report_YYYY-MM-DD_HHMM.md
 reports/report_YYYY-MM-DD_HHMM.json
 ```
+
+## Mode Mock / Demo Sans API
+
+Le mode mock permet de generer un vrai `FinalReport` sans `.env`, sans cle API, sans Internet et sans WhatsApp reel.
+
+Commande principale :
+
+```bash
+crypto-market-agents report --mock
+```
+
+Choisir un scenario de risque :
+
+```bash
+crypto-market-agents report --mock --mock-risk-level high
+```
+
+Les niveaux disponibles sont :
+
+- `low` : scenario calme avec signaux stables ;
+- `medium` : quelques signaux moderes, utilise par defaut ;
+- `high` : volatilite et news negatives fictives ;
+- `critical` : scenario fictif extreme, par exemple hack/exploit simule.
+
+Les rapports mockes sont sauvegardes dans `reports/` par defaut :
+
+```text
+reports/mock_report_YYYY-MM-DD_HHMM.md
+reports/mock_report_YYYY-MM-DD_HHMM.json
+```
+
+Commande Makefile equivalente :
+
+```bash
+make cli-mock
+```
+
+En mode mock, aucun client CoinGecko, NewsAPI, DefiLlama ou WhatsApp n'est instancie par la CLI.
 
 ## Agents Disponibles
 
@@ -343,6 +384,7 @@ Ces scripts utilisent des donnees factices :
 - `scripts/test_final_synthesis_agent.py` : cree de faux `AgentReport` et genere une synthese finale.
 - `scripts/test_full_pipeline_mock.py` : simule le pipeline complet avec donnees mockees, genere Markdown et JSON.
 - `scripts/test_orchestrator_mock.py` : lance `CryptoMarketOrchestrator` avec des agents factices.
+- `scripts/test_cli_mock.py` : lance la CLI officielle en mode mock, sans API externe.
 
 Exemple :
 
@@ -468,6 +510,7 @@ Lancer les scripts mockes sans API externe :
 ```bash
 make mock
 make orchestrator-mock
+make cli-mock
 ```
 
 ## Docker
@@ -559,6 +602,7 @@ python -m coverage run -m unittest discover -s tests
 python -m coverage report --fail-under=80
 python3 scripts/test_full_pipeline_mock.py
 python3 scripts/test_orchestrator_mock.py
+python3 scripts/test_cli_mock.py
 ```
 
 Le job `docker` est separe pour eviter de construire l'image plusieurs fois. Il depend du job `test` et lance :
@@ -621,6 +665,7 @@ crypto-market-agents/
       reporting/
       config.py
       cli.py
+      mock_data.py
       orchestrator.py
       schemas.py
       security.py
