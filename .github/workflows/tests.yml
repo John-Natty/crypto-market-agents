@@ -55,7 +55,7 @@ jobs:
         run: python -m coverage run -m unittest discover -s tests
 
       - name: Coverage report
-        run: python -m coverage report
+        run: python -m coverage report --fail-under=80
 
       - name: Run mock full pipeline
         run: python3 scripts/test_full_pipeline_mock.py

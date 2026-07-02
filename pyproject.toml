@@ -57,6 +57,7 @@ omit = [
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+fail_under = 80
 exclude_lines = [
   'if __name__ == "__main__":',
   'raise SystemExit\(main\(\)\)',

@@ -405,10 +405,70 @@ Mesurer la couverture des tests :
 
 ```bash
 python -m coverage run -m unittest discover -s tests
-python -m coverage report
+python -m coverage report --fail-under=80
 ```
 
-Coverage est configure sans seuil bloquant strict pour cette premiere etape qualite.
+Coverage est configure avec un seuil progressif de 80 % pour eviter les regressions importantes sans bloquer inutilement le projet.
+
+## Makefile Et Commandes Developpeur
+
+Un `Makefile` fournit les commandes locales principales.
+
+Afficher l'aide :
+
+```bash
+make help
+```
+
+Installer le projet et les outils de dev :
+
+```bash
+make install
+```
+
+Lancer les tests principaux :
+
+```bash
+make test
+```
+
+Verifier le lint et le format :
+
+```bash
+make lint
+make format-check
+```
+
+Formater le code Python :
+
+```bash
+make format
+```
+
+Mesurer la couverture avec le seuil 80 % :
+
+```bash
+make coverage
+```
+
+Rejouer localement les controles principaux de la CI :
+
+```bash
+make ci-local
+```
+
+Construire l'image Docker :
+
+```bash
+make docker-build
+```
+
+Lancer les scripts mockes sans API externe :
+
+```bash
+make mock
+make orchestrator-mock
+```
 
 ## Docker
 
@@ -494,9 +554,9 @@ python -m pip install -e ".[dev]"
 python3 -m compileall src tests scripts
 python -m ruff check src tests scripts
 python -m ruff format --check src tests scripts
-python3 -m unittest discover -s tests
+python -m unittest discover -s tests
 python -m coverage run -m unittest discover -s tests
-python -m coverage report
+python -m coverage report --fail-under=80
 python3 scripts/test_full_pipeline_mock.py
 python3 scripts/test_orchestrator_mock.py
 ```
@@ -528,6 +588,7 @@ Les tests CI utilisent des mocks et ne doivent appeler aucune API externe reelle
 ```text
 crypto-market-agents/
   README.md
+  Makefile
   .env.example
   .github/workflows/tests.yml
   .dockerignore
@@ -579,7 +640,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - CLI disponible en version initiale, sans sous-commandes avancees.
 - CI GitHub Actions disponible avec matrice Python 3.11/3.12, lint et coverage.
 - Docker disponible en version simple, sans publication d'image ni registry.
-- Coverage disponible sans seuil bloquant strict.
+- Coverage disponible avec seuil progressif de 80 %.
 - Analyse sentiment simple par mots-cles.
 - Extraction assets/protocoles rule-based.
 - Donnees live dependantes des APIs externes.
@@ -594,7 +655,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Enrichir l'orchestrateur global.
 - Enrichir la CLI.
 - Ajouter d'autres versions Python a la matrice si necessaire.
-- Ajouter un seuil de couverture progressif quand la base de tests sera stabilisee.
+- Augmenter progressivement le seuil de couverture si la base de tests continue de se stabiliser.
 - Ajouter un dashboard.
 - Ajouter une meilleure analyse sentiment.
 - Ajouter GDELT comme fallback news.
