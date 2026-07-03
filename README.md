@@ -27,6 +27,7 @@ et notification courte.
 - Notification WhatsApp optionnelle, desactivee par defaut.
 - Orchestrateur global et premiere commande CLI.
 - Mode mock officiel pour demo complete sans API externe.
+- Scheduler local leger pour relancer les rapports a intervalle regulier.
 - Dockerfile et Docker Compose pour execution conteneurisee.
 - Qualite code avec Ruff et couverture de tests avec Coverage.
 - Retry, backoff et cache court en memoire pour les clients API lecture seule.
@@ -151,6 +152,39 @@ make cli-mock
 ```
 
 En mode mock, aucun client CoinGecko, NewsAPI, DefiLlama ou WhatsApp n'est instancie par la CLI.
+
+## Scheduler Local
+
+La CLI fournit un scheduler local leger pour relancer le meme pipeline a
+intervalle regulier, sans cron, sans daemon et sans dependance externe.
+
+Lancer un seul rapport mock planifie :
+
+```bash
+crypto-market-agents schedule --mock --runs 1
+```
+
+Lancer le scheduler mock avec un intervalle d'une heure :
+
+```bash
+crypto-market-agents schedule --mock --interval-minutes 60
+```
+
+Lancer le scheduler en mode reel toutes les 6 heures, sans WhatsApp :
+
+```bash
+crypto-market-agents schedule --interval-minutes 360 --coins bitcoin ethereum --no-whatsapp
+```
+
+Commande Makefile equivalente en mode mock :
+
+```bash
+make scheduler-mock
+```
+
+Le scheduler affiche le mode utilise, l'intervalle, chaque run, les chemins des
+rapports generes, le risque global, la confidence et le prochain run prevu. Sans
+`--runs`, il continue jusqu'a interruption clavier avec `Ctrl+C`.
 
 ## Agents Disponibles
 
@@ -435,6 +469,7 @@ Ces scripts utilisent des donnees factices :
 - `scripts/test_full_pipeline_mock.py` : simule le pipeline complet avec donnees mockees, genere Markdown, JSON et HTML.
 - `scripts/test_orchestrator_mock.py` : lance `CryptoMarketOrchestrator` avec des agents factices.
 - `scripts/test_cli_mock.py` : lance la CLI officielle en mode mock, sans API externe.
+- `scripts/test_scheduler_mock.py` : lance le scheduler local en mode mock, sans API externe.
 
 Exemple :
 
@@ -561,6 +596,7 @@ Lancer les scripts mockes sans API externe :
 make mock
 make orchestrator-mock
 make cli-mock
+make scheduler-mock
 ```
 
 ## Docker
@@ -653,6 +689,7 @@ python -m coverage report --fail-under=80
 python3 scripts/test_full_pipeline_mock.py
 python3 scripts/test_orchestrator_mock.py
 python3 scripts/test_cli_mock.py
+python3 scripts/test_scheduler_mock.py
 ```
 
 Le job `docker` est separe pour eviter de construire l'image plusieurs fois. Il depend du job `test` et lance :
@@ -790,7 +827,8 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 
 ## Limites Actuelles
 
-- Orchestrateur disponible en version simple, sans scheduler ni retry avance.
+- Orchestrateur disponible en version simple, sans scheduler de production.
+- Scheduler local disponible, sans daemon ni orchestration distribuee.
 - CLI disponible en version initiale, sans sous-commandes avancees.
 - CI GitHub Actions disponible avec matrice Python 3.11/3.12, lint et coverage.
 - Securite GitHub legere avec Dependabot et CodeQL.

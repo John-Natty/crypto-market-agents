@@ -10,7 +10,7 @@ demande jamais de cle privee crypto.
 ## Vue Globale
 
 ```text
-CLI
+CLI (report / schedule)
  |
  v
 CryptoMarketOrchestrator
@@ -129,6 +129,36 @@ la CLI utilise un chemin de demonstration sans dependance externe :
 
 Le mode mock permet de presenter le projet, tester la CLI et verifier le rendu
 sans cle API, sans Internet et sans compte WhatsApp Business.
+
+## Scheduler Local
+
+Quand on lance :
+
+```bash
+crypto-market-agents schedule --interval-minutes 60
+```
+
+la CLI demarre une boucle locale simple qui relance periodiquement le meme
+pipeline que `crypto-market-agents report`.
+
+En mode reel, chaque run cree un `CryptoMarketOrchestrator`, lance les agents,
+produit un `FinalReport`, sauvegarde Markdown/JSON/HTML et applique la logique
+WhatsApp optionnelle.
+
+En mode mock :
+
+```bash
+crypto-market-agents schedule --mock --runs 1
+```
+
+le scheduler relance le pipeline mock officiel : faux `AgentReport`, vraie
+synthese, vrai rendu Markdown/JSON/HTML, aucune API externe et aucun WhatsApp
+reel.
+
+Ce scheduler est volontairement leger. Il utilise `time.sleep`, tourne dans le
+processus courant et s'arrete avec `Ctrl+C`. Ce n'est pas un service de
+production, pas un daemon, pas une file de jobs distribuee et pas un remplacement
+de cron ou d'un orchestrateur dedie.
 
 ## Clients API
 
@@ -269,7 +299,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 - Analyse sentiment simple par mots-cles.
 - Cache memoire seulement, non persistant.
 - Pas de dashboard.
-- Pas de scheduler.
+- Scheduler local simple, pas de service de production.
 - WhatsApp limite aux messages texte simples.
 - Pas de templates WhatsApp.
 - Pas de scan Docker avance.
@@ -278,7 +308,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 ## Ameliorations Futures
 
 - Ajouter un dashboard.
-- Ajouter un scheduler.
+- Ajouter un scheduler de production seulement si le besoin apparait.
 - Ajouter GDELT comme fallback news.
 - Ameliorer l'analyse sentiment.
 - Ajouter un cache persistant optionnel.

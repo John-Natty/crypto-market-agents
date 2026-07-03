@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
@@ -116,6 +116,112 @@ class CLITests(unittest.TestCase):
         self.assertIn("Risque global: critical", output)
         self.assertEqual(payload["global_risk_level"], "critical")
 
+    def test_cli_schedule_mock_runs_once_without_external_calls(self):
+        factory = ExplodingFactory()
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch.dict(os.environ, {"WHATSAPP_ENABLED": "true"}):
+                exit_code, output, payloads = self.run_schedule_mock_cli(
+                    output_dir,
+                    runs=1,
+                    orchestrator_factory=factory,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(factory.calls, 0)
+        self.assertIn("Scheduler demarre.", output)
+        self.assertIn("Mode: mock", output)
+        self.assertIn("Runs prevus: 1", output)
+        self.assertIn("Run 1 demarre", output)
+        self.assertIn("Rapport HTML:", output)
+        self.assertIn("Aucune API externe appelee.", output)
+        self.assertIn("WhatsApp: disabled (mock mode)", output)
+        self.assertEqual(payloads[0]["global_risk_level"], "medium")
+
+    def test_cli_schedule_mock_runs_twice_with_sleep_mocked(self):
+        sleep_calls = []
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            exit_code, output, payloads = self.run_schedule_mock_cli(
+                output_dir,
+                runs=2,
+                interval_minutes=1,
+                sleep_func=sleep_calls.append,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(sleep_calls, [60])
+        self.assertIn("Run 1 demarre", output)
+        self.assertIn("Run 2 demarre", output)
+        self.assertIn("Prochain run prevu:", output)
+        self.assertEqual(len(payloads), 2)
+
+    def test_cli_schedule_mock_risk_level_high(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            _, output, payloads = self.run_schedule_mock_cli(
+                output_dir,
+                runs=1,
+                risk_level="high",
+            )
+
+        self.assertIn("Risque global: high", output)
+        self.assertEqual(payloads[0]["global_risk_level"], "high")
+
+    def test_cli_schedule_rejects_interval_below_one_minute(self):
+        output = StringIO()
+        errors = StringIO()
+
+        with redirect_stdout(output), redirect_stderr(errors), self.assertRaises(SystemExit) as cm:
+            main(["schedule", "--mock", "--interval-minutes", "0"], sleep_func=lambda seconds: None)
+
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--interval-minutes must be at least 1", errors.getvalue())
+
+    def test_cli_schedule_stops_cleanly_on_keyboard_interrupt(self):
+        def interrupted_sleep(seconds):
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            exit_code, output, payloads = self.run_schedule_mock_cli(
+                output_dir,
+                runs=None,
+                interval_minutes=1,
+                sleep_func=interrupted_sleep,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Scheduler interrompu proprement.", output)
+        self.assertEqual(len(payloads), 1)
+
+    def test_cli_schedule_real_no_whatsapp_is_passed_to_orchestrator(self):
+        factory = RecordingFactory()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "schedule",
+                    "--runs",
+                    "1",
+                    "--coins",
+                    "bitcoin",
+                    "ethereum",
+                    "--output-dir",
+                    "reports-test",
+                    "--no-whatsapp",
+                ],
+                orchestrator_factory=factory,
+                sleep_func=lambda seconds: None,
+            )
+
+        self.assertEqual(exit_code, 0)
+        orchestrator = factory.instances[0]
+        self.assertEqual(orchestrator.run_kwargs["coin_ids"], ["bitcoin", "ethereum"])
+        self.assertEqual(orchestrator.run_kwargs["output_dir"], "reports-test")
+        self.assertFalse(orchestrator.run_kwargs["notify_whatsapp"])
+        self.assertIn("Mode: reel", output.getvalue())
+        self.assertIn("WhatsApp summary: skipped", output.getvalue())
+
     def run_mock_cli(
         self,
         output_dir,
@@ -146,6 +252,48 @@ class CLITests(unittest.TestCase):
         markdown = markdown_files[0].read_text(encoding="utf-8")
         html = html_files[0].read_text(encoding="utf-8")
         return exit_code, output.getvalue(), payload, markdown, html
+
+    def run_schedule_mock_cli(
+        self,
+        output_dir,
+        *,
+        runs,
+        interval_minutes=1,
+        risk_level=None,
+        orchestrator_factory=None,
+        sleep_func=None,
+    ):
+        argv = [
+            "schedule",
+            "--mock",
+            "--interval-minutes",
+            str(interval_minutes),
+            "--output-dir",
+            output_dir,
+        ]
+        if runs is not None:
+            argv.extend(["--runs", str(runs)])
+        if risk_level:
+            argv.extend(["--mock-risk-level", risk_level])
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                argv,
+                orchestrator_factory=orchestrator_factory or ExplodingFactory(),
+                sleep_func=sleep_func or (lambda seconds: None),
+            )
+
+        output_path = Path(output_dir)
+        markdown_files = sorted(output_path.glob("mock_report_*.md"))
+        json_files = sorted(output_path.glob("mock_report_*.json"))
+        html_files = sorted(output_path.glob("mock_report_*.html"))
+        self.assertEqual(len(markdown_files), len(json_files))
+        self.assertEqual(len(json_files), len(html_files))
+        self.assertGreaterEqual(len(json_files), 1)
+
+        payloads = [json.loads(path.read_text(encoding="utf-8")) for path in json_files]
+        return exit_code, output.getvalue(), payloads
 
 
 class RecordingFactory:

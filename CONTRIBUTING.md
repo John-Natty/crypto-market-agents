@@ -64,6 +64,12 @@ Run the official mock demo without external APIs:
 make cli-mock
 ```
 
+Run the local scheduler in mock mode:
+
+```bash
+make scheduler-mock
+```
+
 Build the Docker image:
 
 ```bash

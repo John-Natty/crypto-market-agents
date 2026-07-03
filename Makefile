@@ -7,7 +7,7 @@ PROJECT_DIRS := src tests scripts
 IMAGE_NAME := crypto-market-agents
 COVERAGE_MIN := 80
 
-.PHONY: help install test lint format format-check coverage ci-local docker-build mock orchestrator-mock cli-mock clean
+.PHONY: help install test lint format format-check coverage ci-local docker-build mock orchestrator-mock cli-mock scheduler-mock clean
 
 help:
 	@printf "Commandes disponibles:\n"
@@ -22,6 +22,7 @@ help:
 	@printf "  make mock              Lancer le pipeline mocke sans API externe\n"
 	@printf "  make orchestrator-mock Lancer l'orchestrateur mocke sans API externe\n"
 	@printf "  make cli-mock          Lancer la CLI en mode mock sans API externe\n"
+	@printf "  make scheduler-mock    Lancer le scheduler local en mode mock\n"
 	@printf "  make clean             Supprimer les caches et artefacts locaux\n"
 
 install:
@@ -55,6 +56,7 @@ ci-local:
 	$(PYTHON3) scripts/test_full_pipeline_mock.py
 	$(PYTHON3) scripts/test_orchestrator_mock.py
 	$(PYTHON3) scripts/test_cli_mock.py
+	$(PYTHON3) scripts/test_scheduler_mock.py
 
 docker-build:
 	docker build -t $(IMAGE_NAME) .
@@ -67,6 +69,9 @@ orchestrator-mock:
 
 cli-mock:
 	$(CLI) report --mock --output-dir reports
+
+scheduler-mock:
+	$(CLI) schedule --mock --runs 1 --output-dir reports
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
