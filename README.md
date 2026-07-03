@@ -49,6 +49,12 @@ FinalSynthesisAgent
 Markdown / JSON / WhatsApp optionnel
 ```
 
+## Documentation
+
+- Architecture technique : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Guide de contribution : [CONTRIBUTING.md](CONTRIBUTING.md)
+- Politique de securite : [SECURITY.md](SECURITY.md)
+
 ## Orchestrateur Et CLI
 
 `CryptoMarketOrchestrator` relie les briques existantes :
@@ -731,6 +737,8 @@ crypto-market-agents/
   .dockerignore
   Dockerfile
   docker-compose.yml
+  docs/
+    ARCHITECTURE.md
   pyproject.toml
   reports/
   scripts/
