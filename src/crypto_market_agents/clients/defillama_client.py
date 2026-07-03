@@ -8,10 +8,11 @@ import socket
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from crypto_market_agents.config import DefiLlamaConfig
+from crypto_market_agents.security import redact_text
 
 
 class DefiLlamaError(RuntimeError):
@@ -34,11 +35,12 @@ class DefiLlamaAPIError(DefiLlamaError):
     """Raised when DefiLlama returns a non-success HTTP response."""
 
     def __init__(self, *, endpoint: str, status_code: int, body: str) -> None:
-        self.endpoint = endpoint
+        self.endpoint = redact_text(endpoint)
         self.status_code = status_code
-        self.body = body
+        self.body = redact_text(body)
         super().__init__(
-            f"DefiLlama request to {endpoint} failed with HTTP {status_code}: {_truncate(body)}"
+            f"DefiLlama request to {self.endpoint} failed with HTTP "
+            f"{status_code}: {_truncate(self.body)}"
         )
 
 
@@ -152,24 +154,25 @@ class DefiLlamaClient:
                 body = _read_text(response)
         except HTTPError as exc:
             raise DefiLlamaAPIError(
-                endpoint=endpoint,
+                endpoint=redact_text(endpoint),
                 status_code=exc.code,
-                body=_read_text(exc),
+                body=redact_text(_read_text(exc)),
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
             raise DefiLlamaTimeoutError(f"DefiLlama request to {endpoint} timed out.") from exc
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
                 raise DefiLlamaTimeoutError(f"DefiLlama request to {endpoint} timed out.") from exc
+            reason = redact_text(str(exc.reason))
             raise DefiLlamaNetworkError(
-                f"DefiLlama request to {endpoint} failed: {exc.reason}"
+                f"DefiLlama request to {redact_text(endpoint)} failed: {reason}"
             ) from exc
 
         if status_code != 200:
             raise DefiLlamaAPIError(
-                endpoint=endpoint,
+                endpoint=redact_text(endpoint),
                 status_code=status_code,
-                body=body,
+                body=redact_text(body),
             )
         if not body.strip():
             raise DefiLlamaResponseError(f"DefiLlama returned an empty response for {endpoint}.")
@@ -195,7 +198,7 @@ class DefiLlamaClient:
 
 def _clean_base_url(base_url: str) -> str:
     cleaned = _required_text(base_url, "base_url").rstrip("/")
-    parsed = urlparse(cleaned)
+    parsed = urlsplit(cleaned)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("base_url must be a valid http(s) URL.")
 

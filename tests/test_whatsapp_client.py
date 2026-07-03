@@ -143,7 +143,51 @@ class WhatsAppClientTests(unittest.TestCase):
         self.assertFalse(result["sent"])
         self.assertEqual(result["status"], "http_error")
         self.assertNotIn("super-secret-token", result["error"])
-        self.assertIn("***", result["error"])
+        self.assertIn("[REDACTED]", result["error"])
+
+    def test_send_text_message_redacts_token_from_http_error_exception(self):
+        def opener(request, timeout):
+            raise HTTPError(
+                request.full_url,
+                401,
+                "Unauthorized",
+                {},
+                BytesIO(b'{"error":"super-secret-token is invalid"}'),
+            )
+
+        client = WhatsAppClient(
+            enabled=True,
+            access_token="super-secret-token",
+            phone_number_id="123",
+            to_number="33600000000",
+            opener=opener,
+        )
+
+        result = client.send_text_message("Rapport crypto")
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], "http_error")
+        self.assertNotIn("super-secret-token", result["error"])
+        self.assertIn("[REDACTED]", result["error"])
+
+    def test_send_text_message_redacts_token_from_network_error(self):
+        def opener(request, timeout):
+            raise URLError("failed https://graph.test/messages?access_token=super-secret-token")
+
+        client = WhatsAppClient(
+            enabled=True,
+            access_token="super-secret-token",
+            phone_number_id="123",
+            to_number="33600000000",
+            opener=opener,
+        )
+
+        result = client.send_text_message("Rapport crypto")
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], "network_error")
+        self.assertNotIn("super-secret-token", result["error"])
+        self.assertIn("[REDACTED]", result["error"])
 
     def test_send_text_message_handles_timeout(self):
         def opener(request, timeout):

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from crypto_market_agents.config import CoinGeckoConfig
+from crypto_market_agents.security import redact_text
 
 
 class CoinGeckoError(RuntimeError):
@@ -36,9 +36,9 @@ class CoinGeckoAPIError(CoinGeckoError):
     """Raised when CoinGecko returns a non-success HTTP response."""
 
     def __init__(self, *, endpoint: str, status_code: int, body: str) -> None:
-        self.endpoint = _redact_text(endpoint)
+        self.endpoint = redact_text(endpoint)
         self.status_code = status_code
-        self.body = _redact_text(body)
+        self.body = redact_text(body)
         super().__init__(
             f"CoinGecko request to {self.endpoint} failed with HTTP "
             f"{status_code}: {_truncate(self.body)}"
@@ -190,25 +190,26 @@ class CoinGeckoClient:
                 body = _read_text(response)
         except HTTPError as exc:
             raise CoinGeckoAPIError(
-                endpoint=_redact_text(endpoint, self.api_key),
+                endpoint=redact_text(endpoint, secrets=(self.api_key,)),
                 status_code=exc.code,
-                body=_redact_text(_read_text(exc), self.api_key),
+                body=redact_text(_read_text(exc), secrets=(self.api_key,)),
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
             raise CoinGeckoTimeoutError(f"CoinGecko request to {endpoint} timed out.") from exc
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
                 raise CoinGeckoTimeoutError(f"CoinGecko request to {endpoint} timed out.") from exc
-            reason = _redact_text(str(exc.reason), self.api_key)
+            reason = redact_text(str(exc.reason), secrets=(self.api_key,))
             raise CoinGeckoNetworkError(
-                f"CoinGecko request to {_redact_text(endpoint, self.api_key)} failed: {reason}"
+                f"CoinGecko request to {redact_text(endpoint, secrets=(self.api_key,))} "
+                f"failed: {reason}"
             ) from exc
 
         if status_code != 200:
             raise CoinGeckoAPIError(
-                endpoint=_redact_text(endpoint, self.api_key),
+                endpoint=redact_text(endpoint, secrets=(self.api_key,)),
                 status_code=status_code,
-                body=_redact_text(body, self.api_key),
+                body=redact_text(body, secrets=(self.api_key,)),
             )
 
         try:
@@ -345,67 +346,6 @@ def _read_text(response: Any) -> str:
 
 def _is_timeout_reason(reason: Any) -> bool:
     return isinstance(reason, TimeoutError | socket.timeout) or "timed out" in str(reason).lower()
-
-
-SENSITIVE_QUERY_KEYS = {
-    "api_key",
-    "key",
-    "token",
-    "access_token",
-    "x_cg_demo_api_key",
-    "x_cg_pro_api_key",
-}
-URL_RE = re.compile(r"https?://[^\s\"'<>]+")
-
-
-def _redact_text(value: Any, secret: str | None = None) -> str:
-    """Redact sensitive values from text that may contain URLs."""
-
-    redacted = URL_RE.sub(lambda match: _redact_url(match.group(0), secret), str(value))
-    clean_secret = _clean_optional_text(secret)
-    if clean_secret:
-        redacted = redacted.replace(clean_secret, "[REDACTED]")
-
-    return redacted
-
-
-def _redact_url(url: str, secret: str | None = None) -> str:
-    """Return a URL with sensitive query values and credentials masked."""
-
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return "[REDACTED_URL]"
-
-    query = urlencode(
-        [
-            (
-                key,
-                ("[REDACTED]" if key.lower() in SENSITIVE_QUERY_KEYS or value == secret else value),
-            )
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        ]
-    )
-    netloc = _redact_netloc(parts)
-
-    return urlunsplit((parts.scheme, netloc, parts.path, query, ""))
-
-
-def _redact_netloc(parts: Any) -> str:
-    hostname = parts.hostname
-    if not hostname:
-        return "[REDACTED]" if "@" in parts.netloc else parts.netloc
-
-    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
-    try:
-        port = f":{parts.port}" if parts.port is not None else ""
-    except ValueError:
-        port = ""
-
-    if parts.username or parts.password:
-        return f"[REDACTED]@{host}{port}"
-
-    return f"{host}{port}"
 
 
 def _truncate(value: str, limit: int = 500) -> str:

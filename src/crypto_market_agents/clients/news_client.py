@@ -8,10 +8,11 @@ import socket
 from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from crypto_market_agents.config import NewsConfig
+from crypto_market_agents.security import redact_text
 
 
 class NewsError(RuntimeError):
@@ -38,11 +39,12 @@ class NewsAPIHTTPError(NewsError):
     """Raised when the news API returns a non-success HTTP response."""
 
     def __init__(self, *, endpoint: str, status_code: int, body: str) -> None:
-        self.endpoint = endpoint
+        self.endpoint = redact_text(endpoint)
         self.status_code = status_code
-        self.body = body
+        self.body = redact_text(body)
         super().__init__(
-            f"News API request to {endpoint} failed with HTTP {status_code}: {_truncate(body)}"
+            f"News API request to {self.endpoint} failed with HTTP "
+            f"{status_code}: {_truncate(self.body)}"
         )
 
 
@@ -131,7 +133,10 @@ class NewsClient:
 
         if payload.get("status") == "error":
             code = payload.get("code", "unknown")
-            message = payload.get("message", "Unknown NewsAPI error.")
+            message = redact_text(
+                payload.get("message", "Unknown NewsAPI error."),
+                secrets=(self.api_key,),
+            )
             raise NewsAPIStatusError(f"NewsAPI returned {code}: {message}")
 
         articles = payload.get("articles", [])
@@ -155,22 +160,24 @@ class NewsClient:
                 body = _read_text(response)
         except HTTPError as exc:
             raise NewsAPIHTTPError(
-                endpoint=endpoint,
+                endpoint=redact_text(endpoint, secrets=(self.api_key,)),
                 status_code=exc.code,
-                body=_read_text(exc),
+                body=redact_text(_read_text(exc), secrets=(self.api_key,)),
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
             raise NewsTimeoutError(f"News API request to {endpoint} timed out.") from exc
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
                 raise NewsTimeoutError(f"News API request to {endpoint} timed out.") from exc
-            raise NewsNetworkError(f"News API request to {endpoint} failed: {exc.reason}") from exc
+            reason = redact_text(str(exc.reason), secrets=(self.api_key,))
+            safe_endpoint = redact_text(endpoint, secrets=(self.api_key,))
+            raise NewsNetworkError(f"News API request to {safe_endpoint} failed: {reason}") from exc
 
         if status_code != 200:
             raise NewsAPIHTTPError(
-                endpoint=endpoint,
+                endpoint=redact_text(endpoint, secrets=(self.api_key,)),
                 status_code=status_code,
-                body=body,
+                body=redact_text(body, secrets=(self.api_key,)),
             )
 
         try:
@@ -212,7 +219,7 @@ def _clean_article(article: dict[str, Any]) -> dict[str, Any]:
 
 def _clean_base_url(base_url: str) -> str:
     cleaned = _required_text(base_url, "base_url").rstrip("/")
-    parsed = urlparse(cleaned)
+    parsed = urlsplit(cleaned)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("base_url must be a valid http(s) URL.")
 

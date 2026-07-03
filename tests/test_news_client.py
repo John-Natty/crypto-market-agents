@@ -13,7 +13,9 @@ from crypto_market_agents.clients.news_client import (
     NewsAPIHTTPError,
     NewsAPIKeyMissingError,
     NewsClient,
+    NewsNetworkError,
     NewsResponseError,
+    NewsAPIStatusError,
     NewsTimeoutError,
 )
 
@@ -98,6 +100,53 @@ class NewsClientTests(unittest.TestCase):
             client.search_articles("bitcoin")
 
         self.assertEqual(context.exception.status_code, 401)
+
+    def test_http_error_redacts_news_api_key(self):
+        secret = "news-secret-key"
+        body = (
+            b'{"status":"error","message":"news-secret-key invalid",'
+            b'"url":"https://newsapi.test/v2/everything?api_key=news-secret-key"}'
+        )
+        client = NewsClient(
+            api_key=secret,
+            opener=self.make_opener(body, status=401),
+        )
+
+        with self.assertRaises(NewsAPIHTTPError) as context:
+            client.search_articles("bitcoin")
+
+        self.assertNotIn(secret, str(context.exception))
+        self.assertNotIn(secret, context.exception.body)
+        self.assertIn("[REDACTED]", str(context.exception))
+
+    def test_network_error_redacts_news_api_key(self):
+        secret = "news-secret-key"
+
+        def opener(request, timeout):
+            raise URLError("failed https://newsapi.test/v2/everything?api_key=news-secret-key")
+
+        client = NewsClient(api_key=secret, opener=opener)
+
+        with self.assertRaises(NewsNetworkError) as context:
+            client.search_articles("bitcoin")
+
+        self.assertNotIn(secret, str(context.exception))
+        self.assertIn("[REDACTED]", str(context.exception))
+
+    def test_status_error_redacts_news_api_key(self):
+        secret = "news-secret-key"
+        client = NewsClient(
+            api_key=secret,
+            opener=self.make_opener(
+                b'{"status":"error","code":"apiKeyInvalid","message":"news-secret-key is invalid"}'
+            ),
+        )
+
+        with self.assertRaises(NewsAPIStatusError) as context:
+            client.search_articles("bitcoin")
+
+        self.assertNotIn(secret, str(context.exception))
+        self.assertIn("[REDACTED]", str(context.exception))
 
     def test_invalid_json_raises_response_error(self):
         client = NewsClient(

@@ -640,6 +640,19 @@ Le projet ajoute une securite GitHub legere :
 
 Les secrets doivent rester dans un fichier `.env` local et ne jamais etre commites dans Git.
 
+## Logging Et Protection Des Secrets
+
+La redaction des secrets est centralisee dans `crypto_market_agents.security`.
+
+- les URLs sont parsees avec `urllib.parse` avant redaction ;
+- les parametres sensibles comme `api_key`, `access_token`, `token`, `authorization`, `password` ou `secret` sont masques ;
+- les credentials de type `user:password@host` sont masques ;
+- les fragments d'URL ne sont pas conserves dans les messages rediges ;
+- les mappings imbriques peuvent etre rediges avant affichage ;
+- les logs configures via `crypto_market_agents.logging_utils` appliquent aussi la redaction.
+
+Les cles API et tokens doivent rester dans `.env`. Les erreurs et logs ne doivent pas exposer de secret brut, et `.env` ne doit jamais etre commit.
+
 ## Structure Du Projet
 
 ```text
@@ -665,6 +678,7 @@ crypto-market-agents/
       reporting/
       config.py
       cli.py
+      logging_utils.py
       mock_data.py
       orchestrator.py
       schemas.py

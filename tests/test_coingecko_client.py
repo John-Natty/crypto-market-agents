@@ -14,8 +14,8 @@ from crypto_market_agents.clients.coingecko_client import (
     CoinGeckoClient,
     CoinGeckoNetworkError,
     CoinGeckoTimeoutError,
-    _redact_url,
 )
+from crypto_market_agents.security import redact_url
 
 
 class FakeResponse:
@@ -155,7 +155,7 @@ class CoinGeckoClientTests(unittest.TestCase):
             client.ping()
 
         self.assertNotIn(secret, str(context.exception))
-        self.assertIn("%5BREDACTED%5D", str(context.exception))
+        self.assertIn("[REDACTED]", str(context.exception))
 
     def test_timeout_raises_timeout_error(self):
         def opener(request, timeout):
@@ -171,19 +171,19 @@ class CoinGeckoClientTests(unittest.TestCase):
             CoinGeckoClient(base_url="not-a-url")
 
     def test_redact_url_masks_sensitive_query_params(self):
-        redacted = _redact_url(
+        redacted = redact_url(
             "https://api.coingecko.test/path?api_key=secret&access_token=secret2&foo=ok#token"
         )
 
         self.assertNotIn("secret", redacted)
         self.assertNotIn("#token", redacted)
-        self.assertIn("api_key=%5BREDACTED%5D", redacted)
-        self.assertIn("access_token=%5BREDACTED%5D", redacted)
+        self.assertIn("api_key=[REDACTED]", redacted)
+        self.assertIn("access_token=[REDACTED]", redacted)
         self.assertIn("foo=ok", redacted)
         self.assertNotIn("#", redacted)
 
     def test_redact_url_masks_credentials_in_netloc(self):
-        redacted = _redact_url("https://user:password@api.coingecko.test/path?foo=ok")
+        redacted = redact_url("https://user:password@api.coingecko.test/path?foo=ok")
 
         self.assertNotIn("user", redacted)
         self.assertNotIn("password", redacted)

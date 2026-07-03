@@ -9,10 +9,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from crypto_market_agents.config import WhatsAppConfig
+from crypto_market_agents.security import redact_mapping, redact_text
 
 
 GRAPH_API_BASE_URL = "https://graph.facebook.com"
@@ -157,7 +158,7 @@ class WhatsAppClient:
                 sent=False,
                 status="timeout",
                 message="WhatsApp message timed out.",
-                error=str(exc),
+                error=redact_text(str(exc), secrets=(self.access_token,)),
             )
         except URLError as exc:
             if _is_timeout_reason(exc.reason):
@@ -165,13 +166,13 @@ class WhatsAppClient:
                     sent=False,
                     status="timeout",
                     message="WhatsApp message timed out.",
-                    error=str(exc.reason),
+                    error=redact_text(str(exc.reason), secrets=(self.access_token,)),
                 )
             return _result(
                 sent=False,
                 status="network_error",
                 message="WhatsApp network request failed.",
-                error=str(exc.reason),
+                error=redact_text(str(exc.reason), secrets=(self.access_token,)),
             )
 
         if status_code < 200 or status_code >= 300:
@@ -243,12 +244,7 @@ class WhatsAppClient:
         )
 
     def _safe_error_text(self, value: str) -> str:
-        safe_value = value
-        for secret in (self.access_token,):
-            if secret:
-                safe_value = safe_value.replace(secret, "***")
-
-        return _truncate(safe_value)
+        return _truncate(redact_text(value, secrets=(self.access_token,)))
 
 
 def _result(
@@ -265,7 +261,7 @@ def _result(
         status=status,
         message=message,
         error=error,
-        data=data or {},
+        data=redact_mapping(data or {}),
     ).to_dict()
 
 
@@ -297,7 +293,7 @@ def _clean_graph_api_version(value: str) -> str:
 
 def _clean_base_url(base_url: str) -> str:
     cleaned = str(base_url).strip().rstrip("/")
-    parsed = urlparse(cleaned)
+    parsed = urlsplit(cleaned)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("base_url must be a valid http(s) URL.")
 
