@@ -7,15 +7,21 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from crypto_market_agents.logging_utils import get_logger
-from crypto_market_agents.security import redact_url
+from crypto_market_agents.security import redact_text, redact_url
 
 
 TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
+DEFAULT_CACHE_BACKEND = "memory"
+DEFAULT_CACHE_DIR = ".cache/crypto-market-agents"
+SUPPORTED_CACHE_BACKENDS = {"memory", "file"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +32,8 @@ class HTTPClientSettings:
     backoff_seconds: float = 0.5
     cache_ttl_seconds: int = 60
     cache_enabled: bool = True
+    cache_backend: str = DEFAULT_CACHE_BACKEND
+    cache_dir: str = DEFAULT_CACHE_DIR
 
     def __post_init__(self) -> None:
         if self.max_retries < 0:
@@ -34,6 +42,15 @@ class HTTPClientSettings:
             raise ValueError("backoff_seconds must be greater than or equal to 0.")
         if self.cache_ttl_seconds < 0:
             raise ValueError("cache_ttl_seconds must be greater than or equal to 0.")
+        cache_backend = self.cache_backend.strip().lower()
+        if cache_backend not in SUPPORTED_CACHE_BACKENDS:
+            allowed = ", ".join(sorted(SUPPORTED_CACHE_BACKENDS))
+            raise ValueError(f"cache_backend must be one of: {allowed}.")
+        if not str(self.cache_dir).strip():
+            raise ValueError("cache_dir cannot be empty.")
+
+        object.__setattr__(self, "cache_backend", cache_backend)
+        object.__setattr__(self, "cache_dir", str(self.cache_dir).strip())
 
     @classmethod
     def from_env(cls) -> HTTPClientSettings:
@@ -49,6 +66,12 @@ class HTTPClientSettings:
                 maximum=86400,
             ),
             cache_enabled=_env_bool("HTTP_CACHE_ENABLED", True),
+            cache_backend=_env_choice(
+                "HTTP_CACHE_BACKEND",
+                DEFAULT_CACHE_BACKEND,
+                SUPPORTED_CACHE_BACKENDS,
+            ),
+            cache_dir=os.getenv("HTTP_CACHE_DIR", DEFAULT_CACHE_DIR),
         )
 
 
@@ -98,6 +121,113 @@ class InMemoryTTLCache:
         )
 
 
+class FileCacheBackend:
+    """Simple JSON file cache backend for successful read-only GET responses."""
+
+    def __init__(
+        self,
+        cache_dir: str | Path = DEFAULT_CACHE_DIR,
+        *,
+        time_provider: Callable[[], float] | None = None,
+        logger_name: str = __name__,
+    ) -> None:
+        self.cache_dir = Path(cache_dir)
+        self._time_provider = time_provider or time.time
+        self._logger_name = logger_name
+        self._available = True
+
+    def get(self, key: str) -> HTTPResponse | None:
+        """Return a cached file response when present, valid, and not expired."""
+
+        if not self._ensure_cache_dir():
+            return None
+
+        path = self.cache_path(key)
+        try:
+            raw_payload = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            self._warn(
+                "Unable to read HTTP file cache entry %s: %s",
+                path.name,
+                redact_text(str(exc)),
+            )
+            return None
+
+        try:
+            payload = json.loads(raw_payload)
+            created_at = _number(payload.get("created_at"))
+            ttl_seconds = _number(payload.get("ttl_seconds"))
+            status_code = payload.get("status_code")
+            body = payload.get("payload")
+            if not isinstance(status_code, int) or not isinstance(body, str):
+                raise ValueError("cache payload has invalid fields")
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self._warn("Ignoring corrupted HTTP file cache entry %s: %s", path.name, exc)
+            _unlink_safely(path)
+            return None
+
+        if created_at + ttl_seconds <= self._time_provider():
+            self._warn("Ignoring expired HTTP file cache entry %s", path.name)
+            _unlink_safely(path)
+            return None
+
+        return HTTPResponse(status_code=status_code, body=body, from_cache=True)
+
+    def set(self, key: str, response: HTTPResponse, ttl_seconds: int) -> None:
+        """Store a successful response in a JSON file for a positive TTL."""
+
+        if ttl_seconds <= 0 or response.status_code != 200:
+            return
+        if not self._ensure_cache_dir():
+            return
+
+        path = self.cache_path(key)
+        payload = {
+            "created_at": self._time_provider(),
+            "ttl_seconds": ttl_seconds,
+            "status_code": response.status_code,
+            "payload": response.body,
+        }
+        try:
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            self._warn(
+                "Unable to write HTTP file cache entry %s: %s",
+                path.name,
+                redact_text(str(exc)),
+            )
+
+    def cache_path(self, key: str) -> Path:
+        """Return the safe hashed file path for a cache key."""
+
+        return self.cache_dir / f"{_cache_key_digest(key)}.json"
+
+    def _ensure_cache_dir(self) -> bool:
+        if not self._available:
+            return False
+
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._available = False
+            self._warn(
+                "HTTP file cache unavailable at %s: %s",
+                redact_text(str(self.cache_dir)),
+                redact_text(str(exc)),
+            )
+            return False
+
+        return True
+
+    def _warn(self, message: str, *args: Any) -> None:
+        get_logger(self._logger_name).warning(message, *args)
+
+
+CacheBackend = InMemoryTTLCache | FileCacheBackend
+
+
 def send_request_with_retries(
     request: Request,
     *,
@@ -106,7 +236,7 @@ def send_request_with_retries(
     response_status: Callable[[Any], int],
     read_text: Callable[[Any], str],
     settings: HTTPClientSettings | None = None,
-    cache: InMemoryTTLCache | None = None,
+    cache: CacheBackend | None = None,
     sleep: Callable[[float], None] = time.sleep,
     logger_name: str = __name__,
 ) -> HTTPResponse:
@@ -114,7 +244,7 @@ def send_request_with_retries(
 
     selected_settings = settings or HTTPClientSettings.from_env()
     logger = get_logger(logger_name)
-    cache_key = _cache_key(request)
+    cache_key = build_cache_key(request)
     cacheable = _is_cacheable(request, selected_settings, cache)
 
     if cacheable and cache_key is not None:
@@ -201,17 +331,30 @@ def backoff_delay(base_seconds: float, attempt: int) -> float:
     return base_seconds * (2**attempt)
 
 
-def _cache_key(request: Request) -> str | None:
+def build_cache_key(request: Request) -> str | None:
+    """Return the cache key for a GET request, or None for non-cacheable methods."""
+
     if request.get_method().upper() != "GET":
         return None
 
     return request.full_url
 
 
+def build_cache_backend(settings: HTTPClientSettings) -> CacheBackend | None:
+    """Build the configured cache backend."""
+
+    if not settings.cache_enabled or settings.cache_ttl_seconds <= 0:
+        return None
+    if settings.cache_backend == "file":
+        return FileCacheBackend(settings.cache_dir)
+
+    return InMemoryTTLCache()
+
+
 def _is_cacheable(
     request: Request,
     settings: HTTPClientSettings,
-    cache: InMemoryTTLCache | None,
+    cache: CacheBackend | None,
 ) -> bool:
     return (
         cache is not None
@@ -301,3 +444,43 @@ def _env_float(key: str, default: float, *, minimum: float) -> float:
         return default
 
     return parsed
+
+
+def _env_choice(key: str, default: str, choices: set[str]) -> str:
+    value = os.getenv(key)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in choices:
+        return normalized
+
+    allowed = ", ".join(sorted(choices))
+    get_logger(__name__).warning(
+        "Unknown %s value %s; using %s. Allowed values: %s.",
+        key,
+        redact_text(value),
+        default,
+        allowed,
+    )
+    return default
+
+
+def _cache_key_digest(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("expected number")
+
+    return float(value)
+
+
+def _unlink_safely(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return

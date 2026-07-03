@@ -268,7 +268,9 @@ temporaires :
   `504` ;
 - pas de retry sur HTTP `400`, `401`, `403` ou `404` ;
 - backoff exponentiel configurable ;
-- cache memoire TTL pour les `GET` reussis ;
+- cache TTL pour les `GET` reussis, avec backend `memory` par defaut ;
+- cache fichier optionnel via `HTTP_CACHE_BACKEND=file` et `HTTP_CACHE_DIR` ;
+- noms de fichiers de cache bases sur un hash, sans URL brute ni secret ;
 - logs de retry et cache avec URLs redigees.
 
 WhatsApp ne fait pas de retry automatique agressif. Un message WhatsApp est un
@@ -297,7 +299,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 ## Limites Actuelles
 
 - Analyse sentiment simple par mots-cles.
-- Cache memoire seulement, non persistant.
+- Cache fichier simple disponible, sans invalidation avancee ni partage distribue.
 - Pas de dashboard.
 - Scheduler local simple, pas de service de production.
 - WhatsApp limite aux messages texte simples.
@@ -311,7 +313,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 - Ajouter un scheduler de production seulement si le besoin apparait.
 - Ajouter GDELT comme fallback news.
 - Ameliorer l'analyse sentiment.
-- Ajouter un cache persistant optionnel.
+- Ajouter des strategies de cache plus avancees si le besoin apparait.
 - Ajouter des metriques d'execution.
 - Ajouter un scan Docker avance.
 - Ameliorer la presentation HTML si le besoin evolue.

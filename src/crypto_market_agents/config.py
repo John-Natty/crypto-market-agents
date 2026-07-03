@@ -53,6 +53,8 @@ class HTTPConfig:
     backoff_seconds: float
     cache_ttl_seconds: int
     cache_enabled: bool
+    cache_backend: str
+    cache_dir: Path
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,8 @@ def load_config(
             maximum=86400,
         ),
         cache_enabled=_get_bool(env, "HTTP_CACHE_ENABLED", True),
+        cache_backend=_get_choice(env, "HTTP_CACHE_BACKEND", "memory", {"memory", "file"}),
+        cache_dir=Path(_get_non_empty(env, "HTTP_CACHE_DIR", ".cache/crypto-market-agents")),
     )
     cache_ttl_seconds = http.cache_ttl_seconds
     alert_risk_threshold = _get_choice(

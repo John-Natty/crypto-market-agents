@@ -18,6 +18,8 @@ env:
   HTTP_BACKOFF_SECONDS: "0.5"
   HTTP_CACHE_TTL_SECONDS: "60"
   HTTP_CACHE_ENABLED: "true"
+  HTTP_CACHE_BACKEND: "memory"
+  HTTP_CACHE_DIR: ".cache/crypto-market-agents"
 
 jobs:
   test:

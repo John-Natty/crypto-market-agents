@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTHON3 ?= python3
 CLI ?= $(if $(wildcard .venv/bin/crypto-market-agents),.venv/bin/crypto-market-agents,crypto-market-agents)
 PROJECT_DIRS := src tests scripts

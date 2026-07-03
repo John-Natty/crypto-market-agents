@@ -287,7 +287,7 @@ Les clients CoinGecko, NewsAPI et DefiLlama utilisent un helper HTTP commun pour
 - retry limite uniquement sur erreurs temporaires : timeout, erreur reseau, HTTP `429`, `500`, `502`, `503`, `504` ;
 - aucun retry automatique sur HTTP `400`, `401`, `403` ou `404` ;
 - backoff exponentiel simple, par exemple `0.5s`, `1.0s`, `2.0s` avec les valeurs par defaut ;
-- cache court en memoire pour les `GET` reussis, avec TTL configurable ;
+- cache court pour les `GET` reussis, avec backend `memory` par defaut et backend `file` optionnel ;
 - logs de cache hit/miss et retry avec URLs redigees, sans afficher de cle API ni token.
 
 Variables disponibles :
@@ -297,7 +297,20 @@ HTTP_MAX_RETRIES=2
 HTTP_BACKOFF_SECONDS=0.5
 HTTP_CACHE_TTL_SECONDS=60
 HTTP_CACHE_ENABLED=true
+HTTP_CACHE_BACKEND=memory
+HTTP_CACHE_DIR=.cache/crypto-market-agents
 ```
+
+Pour un scheduler local ou des demos repetees, le backend fichier peut etre active :
+
+```env
+HTTP_CACHE_ENABLED=true
+HTTP_CACHE_BACKEND=file
+HTTP_CACHE_DIR=.cache/crypto-market-agents
+HTTP_CACHE_TTL_SECONDS=300
+```
+
+Les entrees du cache fichier sont des fichiers JSON autonomes. Le nom de fichier est un hash de la requete, donc les URLs, cles API et tokens ne sont pas visibles dans les noms de fichiers.
 
 WhatsApp envoie des requetes `POST`. Le client WhatsApp ne fait pas de retry automatique afin d'eviter un risque de double notification si la premiere requete a deja ete acceptee cote API.
 
@@ -421,13 +434,17 @@ HTTP_MAX_RETRIES=2
 HTTP_BACKOFF_SECONDS=0.5
 HTTP_CACHE_TTL_SECONDS=60
 HTTP_CACHE_ENABLED=true
+HTTP_CACHE_BACKEND=memory
+HTTP_CACHE_DIR=.cache/crypto-market-agents
 ```
 
 - `REQUEST_TIMEOUT_SECONDS` : timeout global par defaut.
 - `HTTP_MAX_RETRIES` : nombre maximum de tentatives supplementaires sur erreurs temporaires.
 - `HTTP_BACKOFF_SECONDS` : delai de base du backoff exponentiel.
-- `HTTP_CACHE_TTL_SECONDS` : duree de vie du cache memoire pour les requetes `GET` reussies.
-- `HTTP_CACHE_ENABLED` : active ou desactive le cache court en memoire.
+- `HTTP_CACHE_TTL_SECONDS` : duree de vie du cache pour les requetes `GET` reussies.
+- `HTTP_CACHE_ENABLED` : active ou desactive le cache court.
+- `HTTP_CACHE_BACKEND` : `memory` par defaut, ou `file` pour conserver le cache sur disque.
+- `HTTP_CACHE_DIR` : dossier du cache fichier, ignore par Git et Docker.
 
 ### Garde-Fous De Securite
 
@@ -714,6 +731,8 @@ HTTP_MAX_RETRIES=2
 HTTP_BACKOFF_SECONDS=0.5
 HTTP_CACHE_TTL_SECONDS=60
 HTTP_CACHE_ENABLED=true
+HTTP_CACHE_BACKEND=memory
+HTTP_CACHE_DIR=.cache/crypto-market-agents
 ```
 
 Les tests CI utilisent des mocks et ne doivent appeler aucune API externe reelle.

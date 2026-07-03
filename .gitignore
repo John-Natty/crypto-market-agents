@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.cache/
 .coverage
 htmlcov/
 build/
@@ -32,4 +33,3 @@ reports/*
 Thumbs.db
 .idea/
 .vscode/
-

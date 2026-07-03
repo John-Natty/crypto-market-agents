@@ -41,6 +41,8 @@ class ConfigTests(unittest.TestCase):
             HTTP_BACKOFF_SECONDS=0.25
             HTTP_CACHE_TTL_SECONDS=45
             HTTP_CACHE_ENABLED=false
+            HTTP_CACHE_BACKEND=file
+            HTTP_CACHE_DIR=.test-cache
             WHATSAPP_ENABLED=false
             EXCHANGE_MODE=disabled
             TRADING_ENABLED=false
@@ -69,6 +71,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.http.backoff_seconds, 0.25)
         self.assertEqual(config.http.cache_ttl_seconds, 45)
         self.assertFalse(config.http.cache_enabled)
+        self.assertEqual(config.http.cache_backend, "file")
+        self.assertEqual(config.http.cache_dir, Path(".test-cache"))
         self.assertEqual(config.cache_ttl_seconds, 45)
         self.assertFalse(config.whatsapp.enabled)
         self.assertEqual(config.security.exchange_mode, "disabled")
@@ -83,6 +87,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.http.backoff_seconds, 0.5)
         self.assertEqual(config.http.cache_ttl_seconds, 60)
         self.assertTrue(config.http.cache_enabled)
+        self.assertEqual(config.http.cache_backend, "memory")
+        self.assertEqual(config.http.cache_dir, Path(".cache/crypto-market-agents"))
         self.assertFalse(config.whatsapp.enabled)
         self.assertIsNone(config.whatsapp.access_token)
         self.assertIsNone(config.whatsapp.to_number)
@@ -97,6 +103,12 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_http_configuration_raises_config_error(self):
         env_path = self.write_env("HTTP_BACKOFF_SECONDS=-1\n")
+
+        with self.assertRaises(ConfigError):
+            load_config(env_path, include_os_environ=False)
+
+    def test_invalid_http_cache_backend_raises_config_error(self):
+        env_path = self.write_env("HTTP_CACHE_BACKEND=sqlite\n")
 
         with self.assertRaises(ConfigError):
             load_config(env_path, include_os_environ=False)

@@ -13,8 +13,9 @@ from urllib.request import Request, urlopen
 
 from crypto_market_agents.config import HTTPConfig, NewsConfig
 from crypto_market_agents.http_utils import (
+    CacheBackend,
     HTTPClientSettings,
-    InMemoryTTLCache,
+    build_cache_backend,
     send_request_with_retries,
 )
 from crypto_market_agents.security import redact_text
@@ -70,7 +71,7 @@ class NewsClient:
         max_articles: int = 10,
         opener: Callable[..., Any] | None = None,
         http_settings: HTTPClientSettings | None = None,
-        cache: InMemoryTTLCache | None = None,
+        cache: CacheBackend | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.base_url = _clean_base_url(base_url)
@@ -80,7 +81,7 @@ class NewsClient:
         self.max_articles = _validate_page_size(max_articles)
         self._opener = opener or urlopen
         self.http_settings = http_settings or HTTPClientSettings.from_env()
-        self._cache = cache or InMemoryTTLCache()
+        self._cache = cache if cache is not None else build_cache_backend(self.http_settings)
         self._sleep = sleep or _sleep_noop_if_zero
 
     @classmethod
@@ -252,6 +253,8 @@ def _settings_from_config(http_config: HTTPConfig | None) -> HTTPClientSettings 
         backoff_seconds=http_config.backoff_seconds,
         cache_ttl_seconds=http_config.cache_ttl_seconds,
         cache_enabled=http_config.cache_enabled,
+        cache_backend=http_config.cache_backend,
+        cache_dir=str(http_config.cache_dir),
     )
 
 
