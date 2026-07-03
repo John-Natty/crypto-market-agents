@@ -15,6 +15,7 @@ from crypto_market_agents.clients.defillama_client import (
     DefiLlamaResponseError,
     DefiLlamaTimeoutError,
 )
+from crypto_market_agents.http_utils import HTTPClientSettings, InMemoryTTLCache
 
 
 class FakeResponse:
@@ -74,7 +75,7 @@ class DefiLlamaClientTests(unittest.TestCase):
                 BytesIO(b'{"error":"server"}'),
             )
 
-        client = DefiLlamaClient(opener=opener)
+        client = DefiLlamaClient(opener=opener, http_settings=self.no_retry_settings())
 
         with self.assertRaises(DefiLlamaAPIError) as context:
             client.get_protocols()
@@ -82,7 +83,10 @@ class DefiLlamaClientTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 500)
 
     def test_invalid_json_raises_response_error(self):
-        client = DefiLlamaClient(opener=self.make_opener(b"not json"))
+        client = DefiLlamaClient(
+            opener=self.make_opener(b"not json"),
+            http_settings=self.no_retry_settings(),
+        )
 
         with self.assertRaises(DefiLlamaResponseError):
             client.get_protocols()
@@ -91,18 +95,58 @@ class DefiLlamaClientTests(unittest.TestCase):
         def opener(request, timeout):
             raise URLError(TimeoutError("timed out"))
 
-        client = DefiLlamaClient(opener=opener)
+        client = DefiLlamaClient(opener=opener, http_settings=self.no_retry_settings())
 
         with self.assertRaises(DefiLlamaTimeoutError):
             client.get_protocols()
+
+    def test_retries_temporary_status_then_succeeds(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                return FakeResponse(b'{"error":"rate limit"}', status=429)
+            return FakeResponse(b'[{"name":"Aave","slug":"aave","tvl":1000}]', status=200)
+
+        client = DefiLlamaClient(
+            opener=opener,
+            http_settings=HTTPClientSettings(max_retries=1, backoff_seconds=0),
+            sleep=lambda seconds: None,
+        )
+
+        protocols = client.get_protocols()
+
+        self.assertEqual(protocols[0]["slug"], "aave")
+        self.assertEqual(len(calls), 2)
+
+    def test_cache_hit_reuses_protocols_response(self):
+        calls = []
+        client = DefiLlamaClient(
+            opener=self.make_opener(b'[{"name":"Aave","slug":"aave","tvl":1000}]', calls),
+            http_settings=HTTPClientSettings(
+                max_retries=0,
+                backoff_seconds=0,
+                cache_ttl_seconds=60,
+                cache_enabled=True,
+            ),
+            cache=InMemoryTTLCache(),
+        )
+
+        client.get_protocols()
+        client.get_protocols()
+
+        self.assertEqual(len(calls), 1)
 
     def test_invalid_base_url_raises_value_error(self):
         with self.assertRaises(ValueError):
             DefiLlamaClient(base_url="not-a-url")
 
     @staticmethod
-    def make_opener(payload: bytes, *, status: int = 200):
+    def make_opener(payload: bytes, calls=None, *, status: int = 200):
         def opener(request, timeout):
+            if calls is not None:
+                calls.append(request)
             return FakeResponse(payload, status=status)
 
         return opener
@@ -115,6 +159,10 @@ class DefiLlamaClientTests(unittest.TestCase):
             return FakeResponse(responses[path])
 
         return opener
+
+    @staticmethod
+    def no_retry_settings():
+        return HTTPClientSettings(max_retries=0, backoff_seconds=0, cache_enabled=False)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ def main() -> int:
     """Run a simple live market-agent analysis."""
 
     config = load_config(PROJECT_ROOT / ".env")
-    client = CoinGeckoClient.from_config(config.coingecko)
+    client = CoinGeckoClient.from_config(config.coingecko, config.http)
     report = PriceMarketAgent(client).analyze(
         list(config.watchlist),
         vs_currency=config.base_currency,

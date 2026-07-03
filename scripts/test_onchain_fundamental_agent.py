@@ -22,7 +22,7 @@ def main() -> int:
     """Run a simple live on-chain/fundamental analysis."""
 
     config = load_config(PROJECT_ROOT / ".env")
-    client = DefiLlamaClient.from_config(config.defillama)
+    client = DefiLlamaClient.from_config(config.defillama, config.http)
     report = OnchainFundamentalAgent(client).analyze()
 
     print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))

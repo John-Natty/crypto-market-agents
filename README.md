@@ -28,6 +28,7 @@ Le resultat principal est un `FinalReport` exploitable en Markdown, JSON et noti
 - Mode mock officiel pour demo complete sans API externe.
 - Dockerfile et Docker Compose pour execution conteneurisee.
 - Qualite code avec Ruff et couverture de tests avec Coverage.
+- Retry, backoff et cache court en memoire pour les clients API lecture seule.
 - Tests unitaires et integration mockee sans Internet.
 
 ## Architecture Globale
@@ -233,6 +234,27 @@ Utilisee uniquement si `WHATSAPP_ENABLED=true`.
 
 Par defaut, aucune requete WhatsApp n'est envoyee.
 
+## Robustesse API
+
+Les clients CoinGecko, NewsAPI et DefiLlama utilisent un helper HTTP commun pour les requetes `GET` lecture seule.
+
+- retry limite uniquement sur erreurs temporaires : timeout, erreur reseau, HTTP `429`, `500`, `502`, `503`, `504` ;
+- aucun retry automatique sur HTTP `400`, `401`, `403` ou `404` ;
+- backoff exponentiel simple, par exemple `0.5s`, `1.0s`, `2.0s` avec les valeurs par defaut ;
+- cache court en memoire pour les `GET` reussis, avec TTL configurable ;
+- logs de cache hit/miss et retry avec URLs redigees, sans afficher de cle API ni token.
+
+Variables disponibles :
+
+```env
+HTTP_MAX_RETRIES=2
+HTTP_BACKOFF_SECONDS=0.5
+HTTP_CACHE_TTL_SECONDS=60
+HTTP_CACHE_ENABLED=true
+```
+
+WhatsApp envoie des requetes `POST`. Le client WhatsApp ne fait pas de retry automatique afin d'eviter un risque de double notification si la premiere requete a deja ete acceptee cote API.
+
 ## Installation
 
 Prerequis :
@@ -344,6 +366,22 @@ WHATSAPP_TIMEOUT=20
 - `WHATSAPP_TIMEOUT` : timeout en secondes.
 
 Le projet fonctionne sans WhatsApp.
+
+### Reseau Et Robustesse API
+
+```env
+REQUEST_TIMEOUT_SECONDS=20
+HTTP_MAX_RETRIES=2
+HTTP_BACKOFF_SECONDS=0.5
+HTTP_CACHE_TTL_SECONDS=60
+HTTP_CACHE_ENABLED=true
+```
+
+- `REQUEST_TIMEOUT_SECONDS` : timeout global par defaut.
+- `HTTP_MAX_RETRIES` : nombre maximum de tentatives supplementaires sur erreurs temporaires.
+- `HTTP_BACKOFF_SECONDS` : delai de base du backoff exponentiel.
+- `HTTP_CACHE_TTL_SECONDS` : duree de vie du cache memoire pour les requetes `GET` reussies.
+- `HTTP_CACHE_ENABLED` : active ou desactive le cache court en memoire.
 
 ### Garde-Fous De Securite
 
@@ -623,6 +661,10 @@ NEWS_API_KEY=
 COINGECKO_API_KEY=
 CRYPTOPANIC_API_KEY=
 OPENAI_API_KEY=
+HTTP_MAX_RETRIES=2
+HTTP_BACKOFF_SECONDS=0.5
+HTTP_CACHE_TTL_SECONDS=60
+HTTP_CACHE_ENABLED=true
 ```
 
 Les tests CI utilisent des mocks et ne doivent appeler aucune API externe reelle.
@@ -678,6 +720,7 @@ crypto-market-agents/
       reporting/
       config.py
       cli.py
+      http_utils.py
       logging_utils.py
       mock_data.py
       orchestrator.py

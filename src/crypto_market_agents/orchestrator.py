@@ -83,9 +83,15 @@ class CryptoMarketOrchestrator:
                 onchain_fundamental_agent,
             )
         ):
-            coingecko_client = CoinGeckoClient.from_config(self.config.coingecko)
-            news_client = NewsClient.from_config(self.config.news)
-            defillama_client = DefiLlamaClient.from_config(self.config.defillama)
+            coingecko_client = CoinGeckoClient.from_config(
+                self.config.coingecko,
+                self.config.http,
+            )
+            news_client = NewsClient.from_config(self.config.news, self.config.http)
+            defillama_client = DefiLlamaClient.from_config(
+                self.config.defillama,
+                self.config.http,
+            )
 
             price_market_agent = price_market_agent or PriceMarketAgent(coingecko_client)
             volatility_risk_agent = volatility_risk_agent or VolatilityRiskAgent(coingecko_client)

@@ -46,6 +46,16 @@ class DefiLlamaConfig:
 
 
 @dataclass(frozen=True)
+class HTTPConfig:
+    """Shared HTTP robustness configuration for read-only API clients."""
+
+    max_retries: int
+    backoff_seconds: float
+    cache_ttl_seconds: int
+    cache_enabled: bool
+
+
+@dataclass(frozen=True)
 class LLMConfig:
     """LLM synthesis configuration."""
 
@@ -101,6 +111,7 @@ class AppConfig:
     request_timeout_seconds: int
     cache_ttl_seconds: int
     alert_risk_threshold: str
+    http: HTTPConfig
     coingecko: CoinGeckoConfig
     news: NewsConfig
     defillama: DefiLlamaConfig
@@ -137,7 +148,32 @@ def load_config(
     report_language = _get_choice(env, "REPORT_LANGUAGE", "fr", {"fr", "en"})
     report_output_dir = Path(_get_non_empty(env, "REPORT_OUTPUT_DIR", "reports"))
     request_timeout_seconds = _get_int(env, "REQUEST_TIMEOUT_SECONDS", 20, minimum=1, maximum=120)
-    cache_ttl_seconds = _get_int(env, "CACHE_TTL_SECONDS", 300, minimum=0, maximum=86400)
+    legacy_cache_ttl_seconds = _get_int(
+        env,
+        "CACHE_TTL_SECONDS",
+        60,
+        minimum=0,
+        maximum=86400,
+    )
+    http = HTTPConfig(
+        max_retries=_get_int(env, "HTTP_MAX_RETRIES", 2, minimum=0, maximum=10),
+        backoff_seconds=_get_float(
+            env,
+            "HTTP_BACKOFF_SECONDS",
+            0.5,
+            minimum=0.0,
+            maximum=60.0,
+        ),
+        cache_ttl_seconds=_get_int(
+            env,
+            "HTTP_CACHE_TTL_SECONDS",
+            legacy_cache_ttl_seconds,
+            minimum=0,
+            maximum=86400,
+        ),
+        cache_enabled=_get_bool(env, "HTTP_CACHE_ENABLED", True),
+    )
+    cache_ttl_seconds = http.cache_ttl_seconds
     alert_risk_threshold = _get_choice(
         env,
         "ALERT_RISK_THRESHOLD",
@@ -242,6 +278,7 @@ def load_config(
         request_timeout_seconds=request_timeout_seconds,
         cache_ttl_seconds=cache_ttl_seconds,
         alert_risk_threshold=alert_risk_threshold,
+        http=http,
         coingecko=coingecko,
         news=news,
         defillama=defillama,
@@ -335,6 +372,29 @@ def _get_int(
         parsed = int(value)
     except ValueError as exc:
         raise ConfigError(f"{key} must be an integer.") from exc
+
+    if parsed < minimum or parsed > maximum:
+        raise ConfigError(f"{key} must be between {minimum} and {maximum}.")
+
+    return parsed
+
+
+def _get_float(
+    env: dict[str, str],
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = _get_optional(env, key)
+    if value is None:
+        return default
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ConfigError(f"{key} must be a number.") from exc
 
     if parsed < minimum or parsed > maximum:
         raise ConfigError(f"{key} must be between {minimum} and {maximum}.")

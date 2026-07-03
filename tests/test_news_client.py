@@ -18,6 +18,7 @@ from crypto_market_agents.clients.news_client import (
     NewsAPIStatusError,
     NewsTimeoutError,
 )
+from crypto_market_agents.http_utils import HTTPClientSettings, InMemoryTTLCache
 
 
 class FakeResponse:
@@ -77,6 +78,7 @@ class NewsClientTests(unittest.TestCase):
         client = NewsClient(
             api_key="news-key",
             opener=self.make_opener(b'{"status":"error"}', status=429),
+            http_settings=self.no_retry_settings(),
         )
 
         with self.assertRaises(NewsAPIHTTPError) as context:
@@ -94,7 +96,11 @@ class NewsClientTests(unittest.TestCase):
                 BytesIO(b'{"status":"error","message":"bad key"}'),
             )
 
-        client = NewsClient(api_key="bad-key", opener=opener)
+        client = NewsClient(
+            api_key="bad-key",
+            opener=opener,
+            http_settings=self.no_retry_settings(),
+        )
 
         with self.assertRaises(NewsAPIHTTPError) as context:
             client.search_articles("bitcoin")
@@ -110,6 +116,7 @@ class NewsClientTests(unittest.TestCase):
         client = NewsClient(
             api_key=secret,
             opener=self.make_opener(body, status=401),
+            http_settings=self.no_retry_settings(),
         )
 
         with self.assertRaises(NewsAPIHTTPError) as context:
@@ -125,7 +132,11 @@ class NewsClientTests(unittest.TestCase):
         def opener(request, timeout):
             raise URLError("failed https://newsapi.test/v2/everything?api_key=news-secret-key")
 
-        client = NewsClient(api_key=secret, opener=opener)
+        client = NewsClient(
+            api_key=secret,
+            opener=opener,
+            http_settings=self.no_retry_settings(),
+        )
 
         with self.assertRaises(NewsNetworkError) as context:
             client.search_articles("bitcoin")
@@ -152,6 +163,7 @@ class NewsClientTests(unittest.TestCase):
         client = NewsClient(
             api_key="news-key",
             opener=self.make_opener(b"not json"),
+            http_settings=self.no_retry_settings(),
         )
 
         with self.assertRaises(NewsResponseError):
@@ -161,10 +173,56 @@ class NewsClientTests(unittest.TestCase):
         def opener(request, timeout):
             raise URLError(TimeoutError("timed out"))
 
-        client = NewsClient(api_key="news-key", opener=opener)
+        client = NewsClient(
+            api_key="news-key",
+            opener=opener,
+            http_settings=self.no_retry_settings(),
+        )
 
         with self.assertRaises(NewsTimeoutError):
             client.search_articles("bitcoin")
+
+    def test_retries_temporary_http_status_then_succeeds(self):
+        calls = []
+        body = b'{"status":"ok","totalResults":0,"articles":[]}'
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                return FakeResponse(b'{"status":"error"}', status=503)
+            return FakeResponse(body, status=200)
+
+        client = NewsClient(
+            api_key="news-key",
+            opener=opener,
+            http_settings=HTTPClientSettings(max_retries=1, backoff_seconds=0),
+            sleep=lambda seconds: None,
+        )
+
+        articles = client.search_articles("bitcoin")
+
+        self.assertEqual(articles, [])
+        self.assertEqual(len(calls), 2)
+
+    def test_cache_hit_reuses_article_response(self):
+        calls = []
+        body = b'{"status":"ok","totalResults":0,"articles":[]}'
+        client = NewsClient(
+            api_key="news-key",
+            opener=self.make_opener(body, calls),
+            http_settings=HTTPClientSettings(
+                max_retries=0,
+                backoff_seconds=0,
+                cache_ttl_seconds=60,
+                cache_enabled=True,
+            ),
+            cache=InMemoryTTLCache(),
+        )
+
+        client.search_articles("bitcoin")
+        client.search_articles("bitcoin")
+
+        self.assertEqual(len(calls), 1)
 
     def test_invalid_base_url_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -178,6 +236,10 @@ class NewsClientTests(unittest.TestCase):
             return FakeResponse(payload, status=status)
 
         return opener
+
+    @staticmethod
+    def no_retry_settings():
+        return HTTPClientSettings(max_retries=0, backoff_seconds=0, cache_enabled=False)
 
 
 if __name__ == "__main__":

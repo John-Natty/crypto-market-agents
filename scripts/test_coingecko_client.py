@@ -22,7 +22,7 @@ def main() -> int:
     """Run a simple live API check against CoinGecko."""
 
     config = load_config(PROJECT_ROOT / ".env")
-    client = CoinGeckoClient.from_config(config.coingecko)
+    client = CoinGeckoClient.from_config(config.coingecko, config.http)
 
     try:
         ping = client.ping()

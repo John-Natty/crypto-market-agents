@@ -12,7 +12,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from crypto_market_agents.config import CoinGeckoConfig
+from crypto_market_agents.config import CoinGeckoConfig, HTTPConfig
+from crypto_market_agents.http_utils import (
+    HTTPClientSettings,
+    InMemoryTTLCache,
+    send_request_with_retries,
+)
 from crypto_market_agents.security import redact_text
 
 
@@ -67,20 +72,31 @@ class CoinGeckoClient:
         api_key: str | None = None,
         timeout_seconds: int = 20,
         opener: Callable[..., Any] | None = None,
+        http_settings: HTTPClientSettings | None = None,
+        cache: InMemoryTTLCache | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.base_url = _clean_base_url(base_url)
         self.api_key = _clean_optional_text(api_key)
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._opener = opener or urlopen
+        self.http_settings = http_settings or HTTPClientSettings.from_env()
+        self._cache = cache or InMemoryTTLCache()
+        self._sleep = sleep or _sleep_noop_if_zero
 
     @classmethod
-    def from_config(cls, config: CoinGeckoConfig) -> CoinGeckoClient:
+    def from_config(
+        cls,
+        config: CoinGeckoConfig,
+        http_config: HTTPConfig | None = None,
+    ) -> CoinGeckoClient:
         """Create a client from the validated application config."""
 
         return cls(
             base_url=config.base_url,
             api_key=config.api_key,
             timeout_seconds=config.timeout_seconds,
+            http_settings=_settings_from_config(http_config),
         )
 
     @classmethod
@@ -185,9 +201,19 @@ class CoinGeckoClient:
         request = self._build_request(endpoint, params or {})
 
         try:
-            with self._opener(request, timeout=self.timeout_seconds) as response:
-                status_code = _response_status(response)
-                body = _read_text(response)
+            response = send_request_with_retries(
+                request,
+                opener=self._opener,
+                timeout_seconds=self.timeout_seconds,
+                response_status=_response_status,
+                read_text=_read_text,
+                settings=self.http_settings,
+                cache=self._cache,
+                sleep=self._sleep,
+                logger_name=__name__,
+            )
+            status_code = response.status_code
+            body = response.body
         except HTTPError as exc:
             raise CoinGeckoAPIError(
                 endpoint=redact_text(endpoint, secrets=(self.api_key,)),
@@ -245,6 +271,27 @@ def _api_key_header_name(base_url: str) -> str:
         return "x-cg-pro-api-key"
 
     return "x-cg-demo-api-key"
+
+
+def _settings_from_config(http_config: HTTPConfig | None) -> HTTPClientSettings | None:
+    if http_config is None:
+        return None
+
+    return HTTPClientSettings(
+        max_retries=http_config.max_retries,
+        backoff_seconds=http_config.backoff_seconds,
+        cache_ttl_seconds=http_config.cache_ttl_seconds,
+        cache_enabled=http_config.cache_enabled,
+    )
+
+
+def _sleep_noop_if_zero(seconds: float) -> None:
+    if seconds <= 0:
+        return
+
+    import time
+
+    time.sleep(seconds)
 
 
 def _clean_base_url(base_url: str) -> str:

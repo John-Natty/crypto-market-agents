@@ -11,7 +11,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-from crypto_market_agents.config import DefiLlamaConfig
+from crypto_market_agents.config import DefiLlamaConfig, HTTPConfig
+from crypto_market_agents.http_utils import (
+    HTTPClientSettings,
+    InMemoryTTLCache,
+    send_request_with_retries,
+)
 from crypto_market_agents.security import redact_text
 
 
@@ -53,18 +58,29 @@ class DefiLlamaClient:
         base_url: str = "https://api.llama.fi",
         timeout_seconds: int = 20,
         opener: Callable[..., Any] | None = None,
+        http_settings: HTTPClientSettings | None = None,
+        cache: InMemoryTTLCache | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.base_url = _clean_base_url(base_url)
         self.timeout_seconds = _validate_timeout(timeout_seconds)
         self._opener = opener or urlopen
+        self.http_settings = http_settings or HTTPClientSettings.from_env()
+        self._cache = cache or InMemoryTTLCache()
+        self._sleep = sleep or _sleep_noop_if_zero
 
     @classmethod
-    def from_config(cls, config: DefiLlamaConfig) -> DefiLlamaClient:
+    def from_config(
+        cls,
+        config: DefiLlamaConfig,
+        http_config: HTTPConfig | None = None,
+    ) -> DefiLlamaClient:
         """Create a client from validated application config."""
 
         return cls(
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
+            http_settings=_settings_from_config(http_config),
         )
 
     @classmethod
@@ -149,9 +165,19 @@ class DefiLlamaClient:
         request = self._build_request(endpoint)
 
         try:
-            with self._opener(request, timeout=self.timeout_seconds) as response:
-                status_code = _response_status(response)
-                body = _read_text(response)
+            response = send_request_with_retries(
+                request,
+                opener=self._opener,
+                timeout_seconds=self.timeout_seconds,
+                response_status=_response_status,
+                read_text=_read_text,
+                settings=self.http_settings,
+                cache=self._cache,
+                sleep=self._sleep,
+                logger_name=__name__,
+            )
+            status_code = response.status_code
+            body = response.body
         except HTTPError as exc:
             raise DefiLlamaAPIError(
                 endpoint=redact_text(endpoint),
@@ -203,6 +229,27 @@ def _clean_base_url(base_url: str) -> str:
         raise ValueError("base_url must be a valid http(s) URL.")
 
     return cleaned
+
+
+def _settings_from_config(http_config: HTTPConfig | None) -> HTTPClientSettings | None:
+    if http_config is None:
+        return None
+
+    return HTTPClientSettings(
+        max_retries=http_config.max_retries,
+        backoff_seconds=http_config.backoff_seconds,
+        cache_ttl_seconds=http_config.cache_ttl_seconds,
+        cache_enabled=http_config.cache_enabled,
+    )
+
+
+def _sleep_noop_if_zero(seconds: float) -> None:
+    if seconds <= 0:
+        return
+
+    import time
+
+    time.sleep(seconds)
 
 
 def _required_text(value: str, field_name: str) -> str:

@@ -22,7 +22,7 @@ def main() -> int:
     """Run a simple live news sentiment analysis."""
 
     config = load_config(PROJECT_ROOT / ".env")
-    client = NewsClient.from_config(config.news)
+    client = NewsClient.from_config(config.news, config.http)
     report = NewsSentimentAgent(client).analyze(
         list(config.watchlist),
         language=config.news.language,

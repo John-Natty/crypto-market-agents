@@ -11,7 +11,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from crypto_market_agents.config import NewsConfig
+from crypto_market_agents.config import HTTPConfig, NewsConfig
+from crypto_market_agents.http_utils import (
+    HTTPClientSettings,
+    InMemoryTTLCache,
+    send_request_with_retries,
+)
 from crypto_market_agents.security import redact_text
 
 
@@ -64,6 +69,9 @@ class NewsClient:
         default_query: str = "crypto OR bitcoin OR ethereum OR blockchain",
         max_articles: int = 10,
         opener: Callable[..., Any] | None = None,
+        http_settings: HTTPClientSettings | None = None,
+        cache: InMemoryTTLCache | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.base_url = _clean_base_url(base_url)
         self.api_key = _clean_optional_text(api_key)
@@ -71,9 +79,16 @@ class NewsClient:
         self.default_query = _required_text(default_query, "default_query")
         self.max_articles = _validate_page_size(max_articles)
         self._opener = opener or urlopen
+        self.http_settings = http_settings or HTTPClientSettings.from_env()
+        self._cache = cache or InMemoryTTLCache()
+        self._sleep = sleep or _sleep_noop_if_zero
 
     @classmethod
-    def from_config(cls, config: NewsConfig) -> NewsClient:
+    def from_config(
+        cls,
+        config: NewsConfig,
+        http_config: HTTPConfig | None = None,
+    ) -> NewsClient:
         """Create a client from the validated application config."""
 
         return cls(
@@ -82,6 +97,7 @@ class NewsClient:
             timeout_seconds=config.timeout_seconds,
             default_query=config.default_query,
             max_articles=config.max_articles,
+            http_settings=_settings_from_config(http_config),
         )
 
     @classmethod
@@ -155,9 +171,19 @@ class NewsClient:
         request = self._build_request(endpoint, params)
 
         try:
-            with self._opener(request, timeout=self.timeout_seconds) as response:
-                status_code = _response_status(response)
-                body = _read_text(response)
+            response = send_request_with_retries(
+                request,
+                opener=self._opener,
+                timeout_seconds=self.timeout_seconds,
+                response_status=_response_status,
+                read_text=_read_text,
+                settings=self.http_settings,
+                cache=self._cache,
+                sleep=self._sleep,
+                logger_name=__name__,
+            )
+            status_code = response.status_code
+            body = response.body
         except HTTPError as exc:
             raise NewsAPIHTTPError(
                 endpoint=redact_text(endpoint, secrets=(self.api_key,)),
@@ -215,6 +241,27 @@ def _clean_article(article: dict[str, Any]) -> dict[str, Any]:
         "url": article.get("url"),
         "publishedAt": article.get("publishedAt"),
     }
+
+
+def _settings_from_config(http_config: HTTPConfig | None) -> HTTPClientSettings | None:
+    if http_config is None:
+        return None
+
+    return HTTPClientSettings(
+        max_retries=http_config.max_retries,
+        backoff_seconds=http_config.backoff_seconds,
+        cache_ttl_seconds=http_config.cache_ttl_seconds,
+        cache_enabled=http_config.cache_enabled,
+    )
+
+
+def _sleep_noop_if_zero(seconds: float) -> None:
+    if seconds <= 0:
+        return
+
+    import time
+
+    time.sleep(seconds)
 
 
 def _clean_base_url(base_url: str) -> str:

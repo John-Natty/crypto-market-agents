@@ -189,6 +189,27 @@ class WhatsAppClientTests(unittest.TestCase):
         self.assertNotIn("super-secret-token", result["error"])
         self.assertIn("[REDACTED]", result["error"])
 
+    def test_send_text_message_does_not_retry_network_error(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            raise URLError("temporary network issue")
+
+        client = WhatsAppClient(
+            enabled=True,
+            access_token="token",
+            phone_number_id="123",
+            to_number="33600000000",
+            opener=opener,
+        )
+
+        result = client.send_text_message("Rapport crypto")
+
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["status"], "network_error")
+        self.assertEqual(len(calls), 1)
+
     def test_send_text_message_handles_timeout(self):
         def opener(request, timeout):
             raise URLError(TimeoutError("timed out"))

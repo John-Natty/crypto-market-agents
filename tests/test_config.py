@@ -37,6 +37,10 @@ class ConfigTests(unittest.TestCase):
             NEWS_MAX_ARTICLES=7
             DEFILLAMA_BASE_URL=https://api.llama.fi
             DEFILLAMA_TIMEOUT=11
+            HTTP_MAX_RETRIES=3
+            HTTP_BACKOFF_SECONDS=0.25
+            HTTP_CACHE_TTL_SECONDS=45
+            HTTP_CACHE_ENABLED=false
             WHATSAPP_ENABLED=false
             EXCHANGE_MODE=disabled
             TRADING_ENABLED=false
@@ -61,6 +65,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.news.max_articles, 7)
         self.assertEqual(config.defillama.base_url, "https://api.llama.fi")
         self.assertEqual(config.defillama.timeout_seconds, 11)
+        self.assertEqual(config.http.max_retries, 3)
+        self.assertEqual(config.http.backoff_seconds, 0.25)
+        self.assertEqual(config.http.cache_ttl_seconds, 45)
+        self.assertFalse(config.http.cache_enabled)
+        self.assertEqual(config.cache_ttl_seconds, 45)
         self.assertFalse(config.whatsapp.enabled)
         self.assertEqual(config.security.exchange_mode, "disabled")
 
@@ -70,9 +79,27 @@ class ConfigTests(unittest.TestCase):
         config = load_config(env_path, include_os_environ=False)
 
         self.assertIsNone(config.news.api_key)
+        self.assertEqual(config.http.max_retries, 2)
+        self.assertEqual(config.http.backoff_seconds, 0.5)
+        self.assertEqual(config.http.cache_ttl_seconds, 60)
+        self.assertTrue(config.http.cache_enabled)
         self.assertFalse(config.whatsapp.enabled)
         self.assertIsNone(config.whatsapp.access_token)
         self.assertIsNone(config.whatsapp.to_number)
+
+    def test_legacy_cache_ttl_falls_back_into_http_config(self):
+        env_path = self.write_env("CACHE_TTL_SECONDS=123\n")
+
+        config = load_config(env_path, include_os_environ=False)
+
+        self.assertEqual(config.http.cache_ttl_seconds, 123)
+        self.assertEqual(config.cache_ttl_seconds, 123)
+
+    def test_invalid_http_configuration_raises_config_error(self):
+        env_path = self.write_env("HTTP_BACKOFF_SECONDS=-1\n")
+
+        with self.assertRaises(ConfigError):
+            load_config(env_path, include_os_environ=False)
 
     def test_dotenv_parser_supports_quotes_exports_and_comments(self):
         env_path = self.write_env(

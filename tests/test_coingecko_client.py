@@ -15,6 +15,7 @@ from crypto_market_agents.clients.coingecko_client import (
     CoinGeckoNetworkError,
     CoinGeckoTimeoutError,
 )
+from crypto_market_agents.http_utils import HTTPClientSettings, InMemoryTTLCache
 from crypto_market_agents.security import redact_url
 
 
@@ -101,7 +102,10 @@ class CoinGeckoClientTests(unittest.TestCase):
         self.assertEqual(query["price_change_percentage"], ["1h,24h,7d"])
 
     def test_non_200_response_raises_api_error(self):
-        client = CoinGeckoClient(opener=self.make_opener(b'{"error":"rate limit"}', status=429))
+        client = CoinGeckoClient(
+            opener=self.make_opener(b'{"error":"rate limit"}', status=429),
+            http_settings=self.no_retry_settings(),
+        )
 
         with self.assertRaises(CoinGeckoAPIError) as context:
             client.ping()
@@ -118,7 +122,7 @@ class CoinGeckoClientTests(unittest.TestCase):
                 BytesIO(b'{"error":"invalid key"}'),
             )
 
-        client = CoinGeckoClient(opener=opener)
+        client = CoinGeckoClient(opener=opener, http_settings=self.no_retry_settings())
 
         with self.assertRaises(CoinGeckoAPIError) as context:
             client.ping()
@@ -134,6 +138,7 @@ class CoinGeckoClientTests(unittest.TestCase):
         client = CoinGeckoClient(
             api_key=secret,
             opener=self.make_opener(body, status=401),
+            http_settings=self.no_retry_settings(),
         )
 
         with self.assertRaises(CoinGeckoAPIError) as context:
@@ -149,7 +154,11 @@ class CoinGeckoClientTests(unittest.TestCase):
         def opener(request, timeout):
             raise URLError("failed https://api.coingecko.test/ping?access_token=secret-api-key")
 
-        client = CoinGeckoClient(api_key=secret, opener=opener)
+        client = CoinGeckoClient(
+            api_key=secret,
+            opener=opener,
+            http_settings=self.no_retry_settings(),
+        )
 
         with self.assertRaises(CoinGeckoNetworkError) as context:
             client.ping()
@@ -161,10 +170,69 @@ class CoinGeckoClientTests(unittest.TestCase):
         def opener(request, timeout):
             raise URLError(TimeoutError("timed out"))
 
-        client = CoinGeckoClient(opener=opener)
+        client = CoinGeckoClient(opener=opener, http_settings=self.no_retry_settings())
 
         with self.assertRaises(CoinGeckoTimeoutError):
             client.ping()
+
+    def test_retries_temporary_network_error_then_succeeds(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                raise URLError("temporary network issue")
+            return FakeResponse(b'{"gecko_says":"ok"}')
+
+        client = CoinGeckoClient(
+            opener=opener,
+            http_settings=HTTPClientSettings(max_retries=1, backoff_seconds=0),
+            sleep=lambda seconds: None,
+        )
+
+        payload = client.ping()
+
+        self.assertEqual(payload, {"gecko_says": "ok"})
+        self.assertEqual(len(calls), 2)
+
+    def test_retries_temporary_http_status_then_succeeds(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                return FakeResponse(b'{"error":"temporary"}', status=500)
+            return FakeResponse(b'{"gecko_says":"ok"}', status=200)
+
+        client = CoinGeckoClient(
+            opener=opener,
+            http_settings=HTTPClientSettings(max_retries=1, backoff_seconds=0),
+            sleep=lambda seconds: None,
+        )
+
+        payload = client.ping()
+
+        self.assertEqual(payload, {"gecko_says": "ok"})
+        self.assertEqual(len(calls), 2)
+
+    def test_cache_hit_reuses_get_response(self):
+        calls = []
+        client = CoinGeckoClient(
+            opener=self.make_opener(b'{"bitcoin":{"usd":100}}', calls),
+            http_settings=HTTPClientSettings(
+                max_retries=0,
+                backoff_seconds=0,
+                cache_ttl_seconds=60,
+                cache_enabled=True,
+            ),
+            cache=InMemoryTTLCache(),
+        )
+
+        first = client.get_simple_prices("bitcoin", vs_currencies="usd")
+        second = client.get_simple_prices("bitcoin", vs_currencies="usd")
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 1)
 
     def test_invalid_base_url_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -198,6 +266,10 @@ class CoinGeckoClientTests(unittest.TestCase):
             return FakeResponse(payload, status=status)
 
         return opener
+
+    @staticmethod
+    def no_retry_settings():
+        return HTTPClientSettings(max_retries=0, backoff_seconds=0, cache_enabled=False)
 
 
 if __name__ == "__main__":
