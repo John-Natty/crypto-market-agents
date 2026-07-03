@@ -12,7 +12,9 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from crypto_market_agents.clients.coingecko_client import (
     CoinGeckoAPIError,
     CoinGeckoClient,
+    CoinGeckoNetworkError,
     CoinGeckoTimeoutError,
+    _redact_url,
 )
 
 
@@ -69,6 +71,20 @@ class CoinGeckoClientTests(unittest.TestCase):
         headers = {key.lower(): value for key, value in calls[0].header_items()}
         self.assertEqual(headers["x-cg-pro-api-key"], "pro-key")
 
+    def test_pro_header_requires_exact_hostname(self):
+        calls = []
+        client = CoinGeckoClient(
+            base_url="https://evilpro-api.coingecko.com/api/v3",
+            api_key="demo-key",
+            opener=self.make_opener(b'{"gecko_says":"ok"}', calls),
+        )
+
+        client.ping()
+
+        headers = {key.lower(): value for key, value in calls[0].header_items()}
+        self.assertEqual(headers["x-cg-demo-api-key"], "demo-key")
+        self.assertNotIn("x-cg-pro-api-key", headers)
+
     def test_coin_markets_returns_list(self):
         calls = []
         body = (
@@ -109,6 +125,38 @@ class CoinGeckoClientTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 401)
 
+    def test_http_error_redacts_api_key_from_message_and_body(self):
+        secret = "secret-api-key"
+        body = (
+            b'{"error":"invalid key secret-api-key",'
+            b'"url":"https://api.coingecko.test/ping?api_key=secret-api-key"}'
+        )
+        client = CoinGeckoClient(
+            api_key=secret,
+            opener=self.make_opener(body, status=401),
+        )
+
+        with self.assertRaises(CoinGeckoAPIError) as context:
+            client.ping()
+
+        self.assertNotIn(secret, str(context.exception))
+        self.assertNotIn(secret, context.exception.body)
+        self.assertIn("[REDACTED]", str(context.exception))
+
+    def test_network_error_redacts_api_key_from_reason(self):
+        secret = "secret-api-key"
+
+        def opener(request, timeout):
+            raise URLError("failed https://api.coingecko.test/ping?access_token=secret-api-key")
+
+        client = CoinGeckoClient(api_key=secret, opener=opener)
+
+        with self.assertRaises(CoinGeckoNetworkError) as context:
+            client.ping()
+
+        self.assertNotIn(secret, str(context.exception))
+        self.assertIn("%5BREDACTED%5D", str(context.exception))
+
     def test_timeout_raises_timeout_error(self):
         def opener(request, timeout):
             raise URLError(TimeoutError("timed out"))
@@ -121,6 +169,26 @@ class CoinGeckoClientTests(unittest.TestCase):
     def test_invalid_base_url_raises_value_error(self):
         with self.assertRaises(ValueError):
             CoinGeckoClient(base_url="not-a-url")
+
+    def test_redact_url_masks_sensitive_query_params(self):
+        redacted = _redact_url(
+            "https://api.coingecko.test/path?api_key=secret&access_token=secret2&foo=ok#token"
+        )
+
+        self.assertNotIn("secret", redacted)
+        self.assertNotIn("#token", redacted)
+        self.assertIn("api_key=%5BREDACTED%5D", redacted)
+        self.assertIn("access_token=%5BREDACTED%5D", redacted)
+        self.assertIn("foo=ok", redacted)
+        self.assertNotIn("#", redacted)
+
+    def test_redact_url_masks_credentials_in_netloc(self):
+        redacted = _redact_url("https://user:password@api.coingecko.test/path?foo=ok")
+
+        self.assertNotIn("user", redacted)
+        self.assertNotIn("password", redacted)
+        self.assertIn("[REDACTED]@api.coingecko.test", redacted)
+        self.assertIn("foo=ok", redacted)
 
     @staticmethod
     def make_opener(payload: bytes, calls=None, *, status: int = 200):
