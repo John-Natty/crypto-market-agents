@@ -53,6 +53,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(orchestrator.run_kwargs["output_dir"], "reports-test")
         self.assertTrue(orchestrator.run_kwargs["notify_whatsapp"])
         self.assertIn("Rapport Markdown:", output.getvalue())
+        self.assertIn("Rapport HTML:", output.getvalue())
         self.assertIn("Risque global: high", output.getvalue())
         self.assertIn("WhatsApp summary: sent", output.getvalue())
 
@@ -76,7 +77,7 @@ class CLITests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as output_dir:
             with patch.dict(os.environ, {"WHATSAPP_ENABLED": "true"}):
-                exit_code, output, payload, markdown = self.run_mock_cli(
+                exit_code, output, payload, markdown, html = self.run_mock_cli(
                     output_dir,
                     orchestrator_factory=factory,
                 )
@@ -88,27 +89,29 @@ class CLITests(unittest.TestCase):
         self.assertIn("WhatsApp: disabled (mock mode)", output)
         self.assertIn("Rapport Markdown:", output)
         self.assertIn("Rapport JSON:", output)
+        self.assertIn("Rapport HTML:", output)
         self.assertIn("Disclaimer", markdown)
+        self.assertIn("Disclaimer", html)
         self.assertEqual(payload["global_risk_level"], "medium")
         self.assertEqual(len(payload["agent_reports"]), 4)
 
     def test_cli_report_mock_risk_level_low(self):
         with tempfile.TemporaryDirectory() as output_dir:
-            _, output, payload, _ = self.run_mock_cli(output_dir, risk_level="low")
+            _, output, payload, _, _ = self.run_mock_cli(output_dir, risk_level="low")
 
         self.assertIn("Risque global: low", output)
         self.assertEqual(payload["global_risk_level"], "low")
 
     def test_cli_report_mock_risk_level_high(self):
         with tempfile.TemporaryDirectory() as output_dir:
-            _, output, payload, _ = self.run_mock_cli(output_dir, risk_level="high")
+            _, output, payload, _, _ = self.run_mock_cli(output_dir, risk_level="high")
 
         self.assertIn("Risque global: high", output)
         self.assertEqual(payload["global_risk_level"], "high")
 
     def test_cli_report_mock_risk_level_critical(self):
         with tempfile.TemporaryDirectory() as output_dir:
-            _, output, payload, _ = self.run_mock_cli(output_dir, risk_level="critical")
+            _, output, payload, _, _ = self.run_mock_cli(output_dir, risk_level="critical")
 
         self.assertIn("Risque global: critical", output)
         self.assertEqual(payload["global_risk_level"], "critical")
@@ -134,12 +137,15 @@ class CLITests(unittest.TestCase):
         output_path = Path(output_dir)
         markdown_files = sorted(output_path.glob("mock_report_*.md"))
         json_files = sorted(output_path.glob("mock_report_*.json"))
+        html_files = sorted(output_path.glob("mock_report_*.html"))
         self.assertEqual(len(markdown_files), 1)
         self.assertEqual(len(json_files), 1)
+        self.assertEqual(len(html_files), 1)
 
         payload = json.loads(json_files[0].read_text(encoding="utf-8"))
         markdown = markdown_files[0].read_text(encoding="utf-8")
-        return exit_code, output.getvalue(), payload, markdown
+        html = html_files[0].read_text(encoding="utf-8")
+        return exit_code, output.getvalue(), payload, markdown, html
 
 
 class RecordingFactory:
@@ -183,6 +189,7 @@ class FakeOrchestrator:
             agent_reports=(report,),
             markdown_path=Path("reports-test/report_2026-07-01_1234.md"),
             json_path=Path("reports-test/report_2026-07-01_1234.json"),
+            html_path=Path("reports-test/report_2026-07-01_1234.html"),
             whatsapp_summary={
                 "sent": status == "sent",
                 "channel": "whatsapp",

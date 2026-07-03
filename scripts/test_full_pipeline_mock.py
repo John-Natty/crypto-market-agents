@@ -14,6 +14,7 @@ from crypto_market_agents.agents.onchain_fundamental_agent import OnchainFundame
 from crypto_market_agents.agents.price_market_agent import PriceMarketAgent
 from crypto_market_agents.agents.volatility_risk_agent import VolatilityRiskAgent
 from crypto_market_agents.reporting.report_renderer import (
+    save_html_report,
     save_json_report,
     save_markdown_report,
 )
@@ -35,8 +36,10 @@ def main() -> None:
     output_dir = Path(tempfile.mkdtemp(prefix="crypto-market-agents-"))
     markdown_path = output_dir / "final_report.md"
     json_path = output_dir / "final_report.json"
+    html_path = output_dir / "final_report.html"
     save_markdown_report(final_report, str(markdown_path))
     save_json_report(final_report, str(json_path))
+    save_html_report(final_report, str(html_path))
 
     print("Resume final:")
     print(final_report.market_summary)
@@ -44,6 +47,7 @@ def main() -> None:
     print(f"Confidence: {final_report.confidence:.2f}")
     print(f"Markdown: {markdown_path}")
     print(f"JSON: {json_path}")
+    print(f"HTML: {html_path}")
 
 
 class FakeMarketClient:

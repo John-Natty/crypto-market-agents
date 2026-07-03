@@ -17,8 +17,10 @@ from crypto_market_agents.config import load_config
 from crypto_market_agents.notifications.whatsapp_client import WhatsAppClient
 from crypto_market_agents.notifications.whatsapp_notifier import WhatsAppNotifier
 from crypto_market_agents.reporting.report_renderer import (
+    render_final_report_html,
     render_final_report_json,
     render_final_report_markdown,
+    save_html_report,
     save_json_report,
     save_markdown_report,
 )
@@ -44,6 +46,7 @@ class FullAnalysisFlowTests(unittest.TestCase):
         )
         final_report = FinalSynthesisAgent().synthesize(reports)
         markdown = render_final_report_markdown(final_report)
+        html = render_final_report_html(final_report)
         json_payload = json.loads(render_final_report_json(final_report))
 
         self.assertTrue(all(report.status is AgentStatus.SUCCESS for report in reports))
@@ -51,6 +54,8 @@ class FullAnalysisFlowTests(unittest.TestCase):
         self.assertIn(final_report.global_risk_level, set(RiskLevel))
         self.assertGreater(final_report.confidence, 0)
         self.assertIn("Analyse informative uniquement", markdown)
+        self.assertIn("Analyse informative uniquement", html)
+        self.assertIn("Risque", html)
         self.assertEqual(json_payload["global_risk_level"], final_report.global_risk_level.value)
         self.assertIn("confidence", json_payload)
         self.assertIn("warnings", json_payload)
@@ -68,11 +73,14 @@ class FullAnalysisFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             markdown_path = Path(temp_dir) / "final.md"
             json_path = Path(temp_dir) / "final.json"
+            html_path = Path(temp_dir) / "final.html"
             save_markdown_report(final_report, str(markdown_path))
             save_json_report(final_report, str(json_path))
+            save_html_report(final_report, str(html_path))
 
             self.assertTrue(markdown_path.exists())
             self.assertTrue(json_path.exists())
+            self.assertTrue(html_path.exists())
 
         with tempfile.TemporaryDirectory() as temp_dir:
             env_path = Path(temp_dir) / ".env"

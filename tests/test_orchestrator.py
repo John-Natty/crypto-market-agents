@@ -50,10 +50,13 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(final_report.global_risk_level, RiskLevel.HIGH)
         self.assertEqual(run.markdown_path.name, "report_2026-07-01_1234.md")
         self.assertEqual(run.json_path.name, "report_2026-07-01_1234.json")
+        self.assertEqual(run.html_path.name, "report_2026-07-01_1234.html")
         self.assertTrue(run.markdown_path.exists())
         self.assertTrue(run.json_path.exists())
+        self.assertTrue(run.html_path.exists())
         self.assertEqual(run.whatsapp_summary["status"], "disabled")
         self.assertEqual(json.loads(run.json_path.read_text())["global_risk_level"], "high")
+        self.assertIn("Risque high", run.html_path.read_text(encoding="utf-8"))
 
     def test_orchestrator_real_agents_with_fake_clients_never_touch_external_apis(self):
         output_dir = self.temp_path()
@@ -109,6 +112,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(reports[0].status, AgentStatus.FAILED)
         self.assertIn("boom", reports[0].errors[0])
         self.assertTrue(orchestrator.last_run.json_path.exists())
+        self.assertTrue(orchestrator.last_run.html_path.exists())
         self.assertGreaterEqual(final_report.confidence, 0)
 
     def test_whatsapp_disabled_does_not_call_notifier(self):

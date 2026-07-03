@@ -13,7 +13,8 @@ Crypto Market Agents combine plusieurs sources de donnees pour produire une vue 
 - DefiLlama pour les donnees DeFi et fondamentales publiques ;
 - WhatsApp Cloud API en option pour envoyer un resume ou une alerte de risque.
 
-Le resultat principal est un `FinalReport` exploitable en Markdown, JSON et notification courte.
+Le resultat principal est un `FinalReport` exploitable en Markdown, JSON, HTML
+et notification courte.
 
 ## Fonctionnalites Principales
 
@@ -22,7 +23,7 @@ Le resultat principal est un `FinalReport` exploitable en Markdown, JSON et noti
 - Clients API lecture seule pour CoinGecko, NewsAPI et DefiLlama.
 - Agents specialises produisant des `AgentReport`.
 - Agent de synthese finale produisant un `FinalReport`.
-- Rendu du rapport final en Markdown et JSON.
+- Rendu du rapport final en Markdown, JSON et HTML autonome.
 - Notification WhatsApp optionnelle, desactivee par defaut.
 - Orchestrateur global et premiere commande CLI.
 - Mode mock officiel pour demo complete sans API externe.
@@ -46,7 +47,7 @@ Agents specialises
 FinalSynthesisAgent
         |
         v
-Markdown / JSON / WhatsApp optionnel
+Markdown / JSON / HTML / WhatsApp optionnel
 ```
 
 ## Documentation
@@ -63,7 +64,7 @@ Markdown / JSON / WhatsApp optionnel
 - cree les clients API lecture seule ;
 - lance les agents specialises ;
 - transmet les `AgentReport` a `FinalSynthesisAgent` ;
-- sauvegarde le rapport final en Markdown et JSON ;
+- sauvegarde le rapport final en Markdown, JSON et HTML ;
 - declenche WhatsApp uniquement si l'option est activee.
 
 Commande principale :
@@ -106,7 +107,11 @@ Les rapports sont sauvegardes sous la forme :
 ```text
 reports/report_YYYY-MM-DD_HHMM.md
 reports/report_YYYY-MM-DD_HHMM.json
+reports/report_YYYY-MM-DD_HHMM.html
 ```
+
+Le fichier HTML est autonome : il contient son CSS integre et ne necessite pas
+Internet, CDN ou JavaScript externe.
 
 ## Mode Mock / Demo Sans API
 
@@ -136,6 +141,7 @@ Les rapports mockes sont sauvegardes dans `reports/` par defaut :
 ```text
 reports/mock_report_YYYY-MM-DD_HHMM.md
 reports/mock_report_YYYY-MM-DD_HHMM.json
+reports/mock_report_YYYY-MM-DD_HHMM.html
 ```
 
 Commande Makefile equivalente :
@@ -426,7 +432,7 @@ python3 scripts/test_coingecko_client.py
 Ces scripts utilisent des donnees factices :
 
 - `scripts/test_final_synthesis_agent.py` : cree de faux `AgentReport` et genere une synthese finale.
-- `scripts/test_full_pipeline_mock.py` : simule le pipeline complet avec donnees mockees, genere Markdown et JSON.
+- `scripts/test_full_pipeline_mock.py` : simule le pipeline complet avec donnees mockees, genere Markdown, JSON et HTML.
 - `scripts/test_orchestrator_mock.py` : lance `CryptoMarketOrchestrator` avec des agents factices.
 - `scripts/test_cli_mock.py` : lance la CLI officielle en mode mock, sans API externe.
 

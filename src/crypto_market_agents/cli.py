@@ -12,6 +12,7 @@ from crypto_market_agents.agents.final_synthesis_agent import FinalSynthesisAgen
 from crypto_market_agents.mock_data import build_mock_agent_reports
 from crypto_market_agents.orchestrator import CryptoMarketOrchestrator
 from crypto_market_agents.reporting.report_renderer import (
+    save_html_report,
     save_json_report,
     save_markdown_report,
 )
@@ -29,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     report_parser = subparsers.add_parser(
         "report",
-        help="Run the full analysis flow and save Markdown/JSON reports.",
+        help="Run the full analysis flow and save Markdown/JSON/HTML reports.",
     )
     report_parser.add_argument(
         "--coins",
@@ -61,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument(
         "--output-dir",
         default="reports",
-        help="Directory where Markdown/JSON reports are saved.",
+        help="Directory where Markdown/JSON/HTML reports are saved.",
     )
     report_parser.add_argument(
         "--no-whatsapp",
@@ -119,6 +120,7 @@ def main(
 
         print(f"Rapport Markdown: {run.markdown_path}")
         print(f"Rapport JSON: {run.json_path}")
+        print(f"Rapport HTML: {run.html_path}")
         print(f"Risque global: {final_report.global_risk_level.value}")
         print(f"Confidence globale: {final_report.confidence:.2f}")
         print(f"WhatsApp summary: {_notification_status(run.whatsapp_summary)}")
@@ -135,11 +137,12 @@ def _run_mock_report(args: argparse.Namespace) -> int:
     mock_risk_level = RiskLevel(args.mock_risk_level)
     agent_reports = build_mock_agent_reports(mock_risk_level)
     final_report = FinalSynthesisAgent().synthesize(agent_reports)
-    markdown_path, json_path = _save_mock_reports(final_report, args.output_dir)
+    markdown_path, json_path, html_path = _save_mock_reports(final_report, args.output_dir)
 
     print("Mode: mock")
     print(f"Rapport Markdown: {markdown_path}")
     print(f"Rapport JSON: {json_path}")
+    print(f"Rapport HTML: {html_path}")
     print(f"Risque global: {final_report.global_risk_level.value}")
     print(f"Confidence globale: {final_report.confidence:.2f}")
     print("Aucune API externe appelee.")
@@ -150,17 +153,19 @@ def _run_mock_report(args: argparse.Namespace) -> int:
 def _save_mock_reports(
     final_report: FinalReport,
     output_dir: str | Path,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     markdown_path = target_dir / f"mock_report_{timestamp}.md"
     json_path = target_dir / f"mock_report_{timestamp}.json"
+    html_path = target_dir / f"mock_report_{timestamp}.html"
 
     save_markdown_report(final_report, str(markdown_path))
     save_json_report(final_report, str(json_path))
+    save_html_report(final_report, str(html_path))
 
-    return markdown_path, json_path
+    return markdown_path, json_path, html_path
 
 
 def _notification_status(result: dict[str, Any]) -> str:

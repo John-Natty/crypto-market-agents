@@ -64,6 +64,7 @@ def main() -> None:
     if run:
         print(f"Markdown: {run.markdown_path}")
         print(f"JSON: {run.json_path}")
+        print(f"HTML: {run.html_path}")
 
 
 if __name__ == "__main__":

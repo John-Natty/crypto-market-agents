@@ -25,7 +25,7 @@ Agents specialises
 FinalSynthesisAgent
  |
  v
-Markdown / JSON / WhatsApp optionnel
+Markdown / JSON / HTML / WhatsApp optionnel
 ```
 
 Le coeur du systeme est l'orchestrateur. Il connecte la configuration, les
@@ -60,7 +60,8 @@ docs/
   pour CoinGecko, NewsAPI et DefiLlama.
 - `src/crypto_market_agents/notifications/` contient le client WhatsApp et le
   notifier qui transforme un rapport final en message court.
-- `src/crypto_market_agents/reporting/` contient le rendu Markdown et JSON.
+- `src/crypto_market_agents/reporting/` contient le rendu Markdown, JSON et
+  HTML.
 - `src/crypto_market_agents/security.py` centralise les garde-fous de securite
   et la redaction des secrets.
 - `src/crypto_market_agents/http_utils.py` fournit retry, backoff et cache court
@@ -96,7 +97,7 @@ le flow principal est le suivant :
 7. Si un agent echoue, l'orchestrateur encapsule l'erreur dans un rapport
    `failed` pour continuer le flow quand c'est possible.
 8. `FinalSynthesisAgent` combine les `AgentReport` en un `FinalReport`.
-9. Le rapport final est rendu en Markdown et JSON.
+9. Le rapport final est rendu en Markdown, JSON et HTML.
 10. Les fichiers sont sauvegardes dans `reports/` ou dans le dossier indique par
     `--output-dir`.
 11. WhatsApp est declenche uniquement si la configuration l'active et si la CLI
@@ -123,7 +124,7 @@ la CLI utilise un chemin de demonstration sans dependance externe :
 5. `mock_data.py` cree de faux `AgentReport` coherents pour les agents prix,
    volatilite, news et on-chain.
 6. `FinalSynthesisAgent` reste le vrai moteur de synthese.
-7. Le rendu Markdown et JSON reste le vrai rendu applicatif.
+7. Le rendu Markdown, JSON et HTML reste le vrai rendu applicatif.
 8. Les rapports mockes sont sauvegardes dans `reports/` ou dans `--output-dir`.
 
 Le mode mock permet de presenter le projet, tester la CLI et verifier le rendu
@@ -180,16 +181,21 @@ agents differents sans connaitre leurs details internes.
 
 ## Reporting
 
-Le reporting produit deux formats complementaires :
+Le reporting produit trois formats complementaires :
 
 - Markdown pour une lecture humaine simple ;
-- JSON pour une exploitation automatique, des tests ou une integration future.
+- JSON pour une exploitation automatique, des tests ou une integration future ;
+- HTML autonome pour une lecture plus professionnelle dans un navigateur.
+
+Le HTML contient son CSS integre. Il ne depend pas d'un framework, d'un CDN ou
+d'un JavaScript externe.
 
 Les rapports sont sauvegardes dans `reports/` par defaut :
 
 ```text
 reports/report_YYYY-MM-DD_HHMM.md
 reports/report_YYYY-MM-DD_HHMM.json
+reports/report_YYYY-MM-DD_HHMM.html
 ```
 
 En mode mock, les fichiers utilisent un prefixe `mock_report_`.
@@ -278,5 +284,5 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 - Ajouter un cache persistant optionnel.
 - Ajouter des metriques d'execution.
 - Ajouter un scan Docker avance.
-- Ajouter des rapports HTML.
+- Ameliorer la presentation HTML si le besoin evolue.
 - Ajouter des templates WhatsApp.

@@ -23,6 +23,7 @@ from crypto_market_agents.config import AppConfig, load_config
 from crypto_market_agents.notifications.whatsapp_client import NotificationResult, WhatsAppClient
 from crypto_market_agents.notifications.whatsapp_notifier import WhatsAppNotifier
 from crypto_market_agents.reporting.report_renderer import (
+    save_html_report,
     save_json_report,
     save_markdown_report,
 )
@@ -47,6 +48,7 @@ class OrchestrationRunResult:
     agent_reports: tuple[AgentReport, ...]
     markdown_path: Path
     json_path: Path
+    html_path: Path
     whatsapp_summary: dict[str, Any]
     whatsapp_alert: dict[str, Any]
 
@@ -125,7 +127,7 @@ class CryptoMarketOrchestrator:
         output_dir: str | Path = "reports",
         notify_whatsapp: bool = True,
     ) -> FinalReport:
-        """Run every agent, synthesize the final report, and save Markdown/JSON."""
+        """Run every agent, synthesize the final report, and save Markdown/JSON/HTML."""
 
         selected_coin_ids = _clean_items(coin_ids) or self.config.watchlist
         selected_protocols = _clean_items(protocol_slugs) or DEFAULT_PROTOCOL_SLUGS
@@ -144,7 +146,7 @@ class CryptoMarketOrchestrator:
         )
 
         final_report = self.final_synthesis_agent.synthesize(agent_reports)
-        markdown_path, json_path = self._save_reports(final_report, output_dir)
+        markdown_path, json_path, html_path = self._save_reports(final_report, output_dir)
         whatsapp_summary, whatsapp_alert = self._notify(final_report, notify_whatsapp)
 
         self.last_run = OrchestrationRunResult(
@@ -152,6 +154,7 @@ class CryptoMarketOrchestrator:
             agent_reports=agent_reports,
             markdown_path=markdown_path,
             json_path=json_path,
+            html_path=html_path,
             whatsapp_summary=whatsapp_summary,
             whatsapp_alert=whatsapp_alert,
         )
@@ -230,17 +233,19 @@ class CryptoMarketOrchestrator:
         self,
         final_report: FinalReport,
         output_dir: str | Path,
-    ) -> tuple[Path, Path]:
+    ) -> tuple[Path, Path, Path]:
         target_dir = Path(output_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
         timestamp = self.now_provider().strftime("%Y-%m-%d_%H%M")
         markdown_path = target_dir / f"report_{timestamp}.md"
         json_path = target_dir / f"report_{timestamp}.json"
+        html_path = target_dir / f"report_{timestamp}.html"
 
         save_markdown_report(final_report, str(markdown_path))
         save_json_report(final_report, str(json_path))
+        save_html_report(final_report, str(html_path))
 
-        return markdown_path, json_path
+        return markdown_path, json_path, html_path
 
     def _notify(
         self,
