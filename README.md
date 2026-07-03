@@ -682,6 +682,24 @@ Le projet ajoute une securite GitHub legere :
 
 Les secrets doivent rester dans un fichier `.env` local et ne jamais etre commites dans Git.
 
+## Contribution Et Securite
+
+Les contributions sont bienvenues si elles respectent la posture lecture seule
+du projet.
+
+- Guide de contribution : [CONTRIBUTING.md](CONTRIBUTING.md)
+- Politique de securite : [SECURITY.md](SECURITY.md)
+
+Avant de proposer une pull request, lance les controles locaux :
+
+```bash
+make ci-local
+```
+
+Ne commit jamais `.env`, de vraie cle API, de token, de cle privee crypto ou de
+seed phrase. Les tests doivent rester mockes et ne doivent envoyer aucun message
+WhatsApp reel.
+
 ## Logging Et Protection Des Secrets
 
 La redaction des secrets est centralisee dans `crypto_market_agents.security`.
@@ -700,9 +718,14 @@ Les cles API et tokens doivent rester dans `.env`. Les erreurs et logs ne doiven
 ```text
 crypto-market-agents/
   README.md
+  CONTRIBUTING.md
   Makefile
+  SECURITY.md
   .env.example
   .github/dependabot.yml
+  .github/pull_request_template.md
+  .github/ISSUE_TEMPLATE/bug_report.md
+  .github/ISSUE_TEMPLATE/feature_request.md
   .github/workflows/codeql.yml
   .github/workflows/tests.yml
   .dockerignore
