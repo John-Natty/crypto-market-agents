@@ -21,7 +21,7 @@ from crypto_market_agents.clients.defillama_client import DefiLlamaClient
 from crypto_market_agents.clients.news_client import NewsClient
 from crypto_market_agents.config import AppConfig, load_config
 from crypto_market_agents.notifications.whatsapp_client import NotificationResult, WhatsAppClient
-from crypto_market_agents.notifications.whatsapp_notifier import WhatsAppNotifier
+from crypto_market_agents.notifications.whatsapp_notifier import ReportPaths, WhatsAppNotifier
 from crypto_market_agents.reporting.report_renderer import (
     save_html_report,
     save_json_report,
@@ -33,10 +33,18 @@ from crypto_market_agents.schemas import AgentReport, AgentStatus, FinalReport, 
 class TextNotifier(Protocol):
     """Protocol implemented by WhatsAppNotifier and test doubles."""
 
-    def send_final_report_summary(self, final_report: FinalReport) -> dict[str, Any]:
+    def send_final_report_summary(
+        self,
+        final_report: FinalReport,
+        report_paths: ReportPaths | None = None,
+    ) -> dict[str, Any]:
         """Send a final report summary."""
 
-    def send_high_risk_alert(self, final_report: FinalReport) -> dict[str, Any]:
+    def send_high_risk_alert(
+        self,
+        final_report: FinalReport,
+        report_paths: ReportPaths | None = None,
+    ) -> dict[str, Any]:
         """Send a high-risk alert if needed."""
 
 
@@ -112,7 +120,8 @@ class CryptoMarketOrchestrator:
         self.onchain_fundamental_agent = onchain_fundamental_agent
         self.final_synthesis_agent = final_synthesis_agent or FinalSynthesisAgent()
         self.whatsapp_notifier = whatsapp_notifier or WhatsAppNotifier(
-            WhatsAppClient.from_config(self.config.whatsapp)
+            WhatsAppClient.from_config(self.config.whatsapp),
+            max_message_chars=self.config.whatsapp.max_message_chars,
         )
         self.last_run: OrchestrationRunResult | None = None
 
@@ -147,7 +156,16 @@ class CryptoMarketOrchestrator:
 
         final_report = self.final_synthesis_agent.synthesize(agent_reports)
         markdown_path, json_path, html_path = self._save_reports(final_report, output_dir)
-        whatsapp_summary, whatsapp_alert = self._notify(final_report, notify_whatsapp)
+        report_paths = ReportPaths(
+            markdown_path=markdown_path,
+            json_path=json_path,
+            html_path=html_path,
+        )
+        whatsapp_summary, whatsapp_alert = self._notify(
+            final_report,
+            notify_whatsapp,
+            report_paths,
+        )
 
         self.last_run = OrchestrationRunResult(
             final_report=final_report,
@@ -251,6 +269,7 @@ class CryptoMarketOrchestrator:
         self,
         final_report: FinalReport,
         notify_whatsapp: bool,
+        report_paths: ReportPaths,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not notify_whatsapp:
             return (
@@ -265,10 +284,16 @@ class CryptoMarketOrchestrator:
             )
 
         summary = self._safe_notification_call(
-            lambda: self.whatsapp_notifier.send_final_report_summary(final_report)
+            lambda: self.whatsapp_notifier.send_final_report_summary(
+                final_report,
+                report_paths,
+            )
         )
         alert = self._safe_notification_call(
-            lambda: self.whatsapp_notifier.send_high_risk_alert(final_report)
+            lambda: self.whatsapp_notifier.send_high_risk_alert(
+                final_report,
+                report_paths,
+            )
         )
 
         return summary, alert

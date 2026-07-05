@@ -13,6 +13,12 @@ from typing import Any
 from crypto_market_agents.agents.final_synthesis_agent import FinalSynthesisAgent
 from crypto_market_agents.dashboard import serve_dashboard
 from crypto_market_agents.mock_data import build_mock_agent_reports
+from crypto_market_agents.notifications.whatsapp_notifier import (
+    DEFAULT_MAX_MESSAGE_CHARS,
+    ReportPaths,
+    build_final_report_summary_message,
+    build_high_risk_alert_message,
+)
 from crypto_market_agents.orchestrator import CryptoMarketOrchestrator
 from crypto_market_agents.reporting.report_renderer import (
     save_html_report,
@@ -33,6 +39,9 @@ class GeneratedReport:
     mock: bool
     whatsapp_summary: dict[str, Any] | None = None
     whatsapp_alert: dict[str, Any] | None = None
+    whatsapp_preview: bool = False
+    whatsapp_summary_preview: str | None = None
+    whatsapp_alert_preview: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -172,6 +181,11 @@ def _add_report_arguments(parser: argparse.ArgumentParser) -> None:
         help="Do not send WhatsApp notifications even if enabled in .env.",
     )
     parser.add_argument(
+        "--whatsapp-preview",
+        action="store_true",
+        help="Display WhatsApp messages without sending them.",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Run a full demo with fictitious data and no external API calls.",
@@ -211,12 +225,20 @@ def _generate_real_report(
         news_language=args.news_language,
         protocol_slugs=args.protocols,
         output_dir=args.output_dir,
-        notify_whatsapp=not args.no_whatsapp,
+        notify_whatsapp=not args.no_whatsapp and not args.whatsapp_preview,
     )
 
     run = orchestrator.last_run
     if run is None:
         raise RuntimeError("orchestrator did not expose run metadata.")
+
+    summary_preview, alert_preview = _build_whatsapp_previews(
+        final_report,
+        run.markdown_path,
+        run.json_path,
+        run.html_path,
+        max_message_chars=_orchestrator_whatsapp_max_chars(orchestrator),
+    )
 
     return GeneratedReport(
         final_report=final_report,
@@ -226,6 +248,9 @@ def _generate_real_report(
         mock=False,
         whatsapp_summary=run.whatsapp_summary,
         whatsapp_alert=run.whatsapp_alert,
+        whatsapp_preview=args.whatsapp_preview,
+        whatsapp_summary_preview=summary_preview if args.whatsapp_preview else None,
+        whatsapp_alert_preview=alert_preview if args.whatsapp_preview else None,
     )
 
 
@@ -237,12 +262,23 @@ def _generate_mock_report(args: argparse.Namespace) -> GeneratedReport:
     final_report = FinalSynthesisAgent().synthesize(agent_reports)
     markdown_path, json_path, html_path = _save_mock_reports(final_report, args.output_dir)
 
+    summary_preview, alert_preview = _build_whatsapp_previews(
+        final_report,
+        markdown_path,
+        json_path,
+        html_path,
+        max_message_chars=DEFAULT_MAX_MESSAGE_CHARS,
+    )
+
     return GeneratedReport(
         final_report=final_report,
         markdown_path=markdown_path,
         json_path=json_path,
         html_path=html_path,
         mock=True,
+        whatsapp_preview=args.whatsapp_preview,
+        whatsapp_summary_preview=summary_preview if args.whatsapp_preview else None,
+        whatsapp_alert_preview=alert_preview if args.whatsapp_preview else None,
     )
 
 
@@ -300,10 +336,12 @@ def _print_generated_report(report: GeneratedReport) -> None:
     if report.mock:
         print("Aucune API externe appelee.")
         print("WhatsApp: disabled (mock mode)")
+        _print_whatsapp_preview(report)
         return
 
     print(f"WhatsApp summary: {_notification_status(report.whatsapp_summary or {})}")
     print(f"WhatsApp alert: {_notification_status(report.whatsapp_alert or {})}")
+    _print_whatsapp_preview(report)
 
 
 def _save_mock_reports(
@@ -344,6 +382,56 @@ def _notification_status(result: dict[str, Any]) -> str:
         return f"{status} ({result['error']})"
 
     return status
+
+
+def _build_whatsapp_previews(
+    final_report: FinalReport,
+    markdown_path: Path,
+    json_path: Path,
+    html_path: Path,
+    *,
+    max_message_chars: int,
+) -> tuple[str, str]:
+    report_paths = ReportPaths(
+        markdown_path=markdown_path,
+        json_path=json_path,
+        html_path=html_path,
+    )
+    summary = build_final_report_summary_message(
+        final_report,
+        report_paths,
+        max_message_chars=max_message_chars,
+    )
+    alert = (
+        build_high_risk_alert_message(
+            final_report,
+            report_paths,
+            max_message_chars=max_message_chars,
+        )
+        if final_report.global_risk_level in {RiskLevel.HIGH, RiskLevel.CRITICAL}
+        else (
+            "Aucune alerte WhatsApp high/critical: risque global "
+            f"{final_report.global_risk_level.value}."
+        )
+    )
+    return summary, alert
+
+
+def _orchestrator_whatsapp_max_chars(orchestrator: CryptoMarketOrchestrator) -> int:
+    config = getattr(orchestrator, "config", None)
+    whatsapp = getattr(config, "whatsapp", None)
+    return int(getattr(whatsapp, "max_message_chars", DEFAULT_MAX_MESSAGE_CHARS))
+
+
+def _print_whatsapp_preview(report: GeneratedReport) -> None:
+    if not report.whatsapp_preview:
+        return
+
+    print("WhatsApp preview: enabled")
+    print("WhatsApp summary preview:")
+    print(report.whatsapp_summary_preview or "")
+    print("WhatsApp alert preview:")
+    print(report.whatsapp_alert_preview or "")
 
 
 if __name__ == "__main__":

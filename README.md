@@ -89,7 +89,8 @@ crypto-market-agents report \
   --news-query "crypto OR bitcoin OR ethereum" \
   --protocols uniswap aave lido \
   --output-dir reports \
-  --no-whatsapp
+  --no-whatsapp \
+  --whatsapp-preview
 ```
 
 - `--coins` : CoinGecko coin IDs a analyser.
@@ -99,6 +100,7 @@ crypto-market-agents report \
 - `--protocols` : slugs DefiLlama a analyser.
 - `--output-dir` : dossier de sauvegarde, par defaut `reports`.
 - `--no-whatsapp` : desactive WhatsApp pour cette execution.
+- `--whatsapp-preview` : affiche les messages WhatsApp prevus sans les envoyer.
 - `--mock` : lance une demo complete avec donnees fictives, sans API externe.
 - `--mock-risk-level` : scenario mock `low`, `medium`, `high` ou `critical`.
 - `--env-file` : chemin optionnel vers un fichier `.env`.
@@ -293,10 +295,25 @@ Combine les `AgentReport` des agents specialises pour produire un `FinalReport` 
 
 Formate un `FinalReport` pour WhatsApp et envoie en option :
 
-- un resume court du rapport final ;
-- une alerte si `global_risk_level` vaut `high` ou `critical`.
+- un resume court du rapport final avec risque global, confidence, top findings,
+  assets/protocoles a surveiller, nombre de warnings et chemin HTML si connu ;
+- une alerte `[ALERTE RISQUE]` si `global_risk_level` vaut `high` ou `critical`,
+  avec raison principale et findings prioritaires ;
+- un mode preview qui construit les messages sans appeler WhatsApp.
 
 WhatsApp reste desactive par defaut et le projet fonctionne sans compte WhatsApp Business/API.
+La taille des messages est limitee avec `WHATSAPP_MAX_MESSAGE_CHARS`, par defaut
+`1500`, puis tronquee proprement si necessaire.
+
+Preview sans envoi :
+
+```bash
+crypto-market-agents report --whatsapp-preview
+crypto-market-agents report --mock --whatsapp-preview
+```
+
+En mode mock, aucun message WhatsApp reel n'est envoye, meme si
+`WHATSAPP_ENABLED=true` existe dans l'environnement.
 
 ## Sources De Donnees
 
@@ -459,6 +476,7 @@ WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_TO_NUMBER=
 WHATSAPP_GRAPH_API_VERSION=v23.0
 WHATSAPP_TIMEOUT=20
+WHATSAPP_MAX_MESSAGE_CHARS=1500
 ```
 
 - `WHATSAPP_ENABLED=false` : aucune requete WhatsApp n'est envoyee.
@@ -467,6 +485,7 @@ WHATSAPP_TIMEOUT=20
 - `WHATSAPP_TO_NUMBER` : destinataire.
 - `WHATSAPP_GRAPH_API_VERSION` : version Graph API Meta.
 - `WHATSAPP_TIMEOUT` : timeout en secondes.
+- `WHATSAPP_MAX_MESSAGE_CHARS` : taille maximale des messages generes.
 
 Le projet fonctionne sans WhatsApp.
 

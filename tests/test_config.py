@@ -75,6 +75,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.http.cache_dir, Path(".test-cache"))
         self.assertEqual(config.cache_ttl_seconds, 45)
         self.assertFalse(config.whatsapp.enabled)
+        self.assertEqual(config.whatsapp.max_message_chars, 1500)
         self.assertEqual(config.security.exchange_mode, "disabled")
 
     def test_defaults_do_not_require_news_or_whatsapp_keys(self):
@@ -147,6 +148,7 @@ class ConfigTests(unittest.TestCase):
             WHATSAPP_TO_NUMBER=33600000000
             WHATSAPP_GRAPH_API_VERSION=v23.0
             WHATSAPP_TIMEOUT=7
+            WHATSAPP_MAX_MESSAGE_CHARS=1200
             """
         )
 
@@ -158,6 +160,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.whatsapp.to_number, "33600000000")
         self.assertEqual(config.whatsapp.graph_api_version, "v23.0")
         self.assertEqual(config.whatsapp.timeout_seconds, 7)
+        self.assertEqual(config.whatsapp.max_message_chars, 1200)
+
+    def test_invalid_whatsapp_max_message_chars_raises_config_error(self):
+        env_path = self.write_env("WHATSAPP_MAX_MESSAGE_CHARS=50\n")
+
+        with self.assertRaises(ConfigError):
+            load_config(env_path, include_os_environ=False)
 
     def test_llm_enabled_requires_api_key_and_model(self):
         env_path = self.write_env("LLM_ENABLED=true\nOPENAI_API_KEY=test\n")

@@ -76,6 +76,7 @@ class WhatsAppConfig:
     to_number: str | None
     graph_api_version: str
     timeout_seconds: int
+    max_message_chars: int
 
     @property
     def to_phone_number(self) -> str | None:
@@ -261,6 +262,13 @@ def load_config(
             request_timeout_seconds,
             minimum=1,
             maximum=120,
+        ),
+        max_message_chars=_get_int(
+            env,
+            "WHATSAPP_MAX_MESSAGE_CHARS",
+            1500,
+            minimum=200,
+            maximum=4096,
         ),
     )
     security = SecurityConfig(

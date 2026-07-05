@@ -102,6 +102,8 @@ le flow principal est le suivant :
     `--output-dir`.
 11. WhatsApp est declenche uniquement si la configuration l'active et si la CLI
     ne l'a pas desactive avec `--no-whatsapp`.
+    Avec `--whatsapp-preview`, la CLI construit les messages prevus mais force
+    l'execution sans envoi reel.
 
 Ce flux peut appeler des APIs externes si les clients reels sont utilises et que
 la configuration le permet.
@@ -176,6 +178,25 @@ Les clients sont volontairement simples, testables et limites a leur domaine.
 CoinGecko, NewsAPI et DefiLlama sont des clients lecture seule. `WhatsAppClient`
 est le seul client qui effectue un `POST`, uniquement pour envoyer un message
 texte optionnel. Il ne gere pas de trading, wallet, paiement ou transfert.
+
+## Notifications WhatsApp
+
+`WhatsAppNotifier` separe trois etapes simples :
+
+- build : construction du resume final ou de l'alerte high/critical depuis le
+  `FinalReport` ;
+- preview : affichage du message construit sans appel WhatsApp ;
+- send : envoi texte via `WhatsAppClient` uniquement si WhatsApp est active.
+
+Les messages incluent le risque global, la confidence, les findings utiles, les
+assets/protocoles a surveiller, le nombre de warnings et, quand disponible, le
+chemin du rapport HTML. Les alertes high/critical commencent par
+`[ALERTE RISQUE]` et priorisent les signaux de risque.
+
+La taille est bornee par `WHATSAPP_MAX_MESSAGE_CHARS` avec une valeur par defaut
+de `1500`. Le contenu dynamique passe par la redaction de secrets avant preview
+ou envoi. Le projet ne fournit pas de webhook entrant, pas de bot
+conversationnel et pas de conversation WhatsApp entrante.
 
 ## Agents
 

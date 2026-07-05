@@ -145,6 +145,9 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(notifier.summary_calls, 1)
         self.assertEqual(notifier.alert_calls, 1)
+        self.assertIsNotNone(notifier.last_summary_paths)
+        self.assertEqual(notifier.last_summary_paths.html_path, orchestrator.last_run.html_path)
+        self.assertEqual(notifier.last_alert_paths.html_path, orchestrator.last_run.html_path)
         self.assertEqual(orchestrator.last_run.whatsapp_summary["status"], "sent")
         self.assertEqual(orchestrator.last_run.whatsapp_alert["status"], "sent")
 
@@ -212,9 +215,12 @@ class RecordingNotifier:
     def __init__(self):
         self.summary_calls = 0
         self.alert_calls = 0
+        self.last_summary_paths = None
+        self.last_alert_paths = None
 
-    def send_final_report_summary(self, final_report):
+    def send_final_report_summary(self, final_report, report_paths=None):
         self.summary_calls += 1
+        self.last_summary_paths = report_paths
         return {
             "sent": True,
             "channel": "whatsapp",
@@ -224,8 +230,9 @@ class RecordingNotifier:
             "data": {},
         }
 
-    def send_high_risk_alert(self, final_report):
+    def send_high_risk_alert(self, final_report, report_paths=None):
         self.alert_calls += 1
+        self.last_alert_paths = report_paths
         return {
             "sent": True,
             "channel": "whatsapp",
@@ -237,10 +244,10 @@ class RecordingNotifier:
 
 
 class FailingNotifier:
-    def send_final_report_summary(self, final_report):
+    def send_final_report_summary(self, final_report, report_paths=None):
         raise AssertionError("Notifier should not be called when WhatsApp is disabled.")
 
-    def send_high_risk_alert(self, final_report):
+    def send_high_risk_alert(self, final_report, report_paths=None):
         raise AssertionError("Notifier should not be called when WhatsApp is disabled.")
 
 

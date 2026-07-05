@@ -72,6 +72,25 @@ class CLITests(unittest.TestCase):
         self.assertFalse(orchestrator.run_kwargs["notify_whatsapp"])
         self.assertIn("WhatsApp summary: skipped", output.getvalue())
 
+    def test_cli_report_whatsapp_preview_does_not_send(self):
+        factory = RecordingFactory()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                ["report", "--coins", "bitcoin", "--whatsapp-preview"],
+                orchestrator_factory=factory,
+            )
+
+        self.assertEqual(exit_code, 0)
+        orchestrator = factory.instances[0]
+        self.assertFalse(orchestrator.run_kwargs["notify_whatsapp"])
+        self.assertIn("WhatsApp preview: enabled", output.getvalue())
+        self.assertIn("WhatsApp summary preview:", output.getvalue())
+        self.assertIn("WhatsApp alert preview:", output.getvalue())
+        self.assertIn("Rapport HTML: reports-test/report_2026-07-01_1234.html", output.getvalue())
+        self.assertIn("[ALERTE RISQUE]", output.getvalue())
+
     def test_cli_report_mock_creates_reports_without_orchestrator_or_whatsapp(self):
         factory = ExplodingFactory()
 
@@ -94,6 +113,24 @@ class CLITests(unittest.TestCase):
         self.assertIn("Disclaimer", html)
         self.assertEqual(payload["global_risk_level"], "medium")
         self.assertEqual(len(payload["agent_reports"]), 4)
+
+    def test_cli_report_mock_whatsapp_preview_never_uses_orchestrator(self):
+        factory = ExplodingFactory()
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch.dict(os.environ, {"WHATSAPP_ENABLED": "true"}):
+                exit_code, output, payload, _, _ = self.run_mock_cli(
+                    output_dir,
+                    orchestrator_factory=factory,
+                    whatsapp_preview=True,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(factory.calls, 0)
+        self.assertEqual(payload["global_risk_level"], "medium")
+        self.assertIn("WhatsApp: disabled (mock mode)", output)
+        self.assertIn("WhatsApp preview: enabled", output)
+        self.assertIn("Aucune API externe appelee.", output)
 
     def test_cli_report_mock_risk_level_low(self):
         with tempfile.TemporaryDirectory() as output_dir:
@@ -222,6 +259,29 @@ class CLITests(unittest.TestCase):
         self.assertIn("Mode: reel", output.getvalue())
         self.assertIn("WhatsApp summary: skipped", output.getvalue())
 
+    def test_cli_schedule_real_whatsapp_preview_disables_send(self):
+        factory = RecordingFactory()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "schedule",
+                    "--runs",
+                    "1",
+                    "--coins",
+                    "bitcoin",
+                    "--whatsapp-preview",
+                ],
+                orchestrator_factory=factory,
+                sleep_func=lambda seconds: None,
+            )
+
+        self.assertEqual(exit_code, 0)
+        orchestrator = factory.instances[0]
+        self.assertFalse(orchestrator.run_kwargs["notify_whatsapp"])
+        self.assertIn("WhatsApp preview: enabled", output.getvalue())
+
     def test_cli_dashboard_parses_arguments_without_orchestrator(self):
         factory = ExplodingFactory()
         dashboard_runner = RecordingDashboardRunner()
@@ -259,10 +319,13 @@ class CLITests(unittest.TestCase):
         *,
         risk_level=None,
         orchestrator_factory=None,
+        whatsapp_preview=False,
     ):
         argv = ["report", "--mock", "--output-dir", output_dir]
         if risk_level:
             argv.extend(["--mock-risk-level", risk_level])
+        if whatsapp_preview:
+            argv.append("--whatsapp-preview")
 
         output = StringIO()
         with redirect_stdout(output):
