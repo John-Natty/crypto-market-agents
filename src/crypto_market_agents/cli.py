@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from crypto_market_agents.agents.final_synthesis_agent import FinalSynthesisAgent
+from crypto_market_agents.dashboard import serve_dashboard
 from crypto_market_agents.mock_data import build_mock_agent_reports
 from crypto_market_agents.orchestrator import CryptoMarketOrchestrator
 from crypto_market_agents.reporting.report_renderer import (
@@ -67,6 +68,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_report_arguments(schedule_parser)
 
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Serve a lightweight local dashboard for existing reports.",
+    )
+    dashboard_parser.add_argument(
+        "--reports-dir",
+        default="reports",
+        help="Directory containing generated reports, default: reports.",
+    )
+    dashboard_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for the local dashboard, default: 127.0.0.1.",
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for the local dashboard, default: 8000.",
+    )
+
     return parser
 
 
@@ -74,6 +96,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     orchestrator_factory: Callable[..., CryptoMarketOrchestrator] = CryptoMarketOrchestrator,
+    dashboard_runner: Callable[..., None] = serve_dashboard,
     sleep_func: Callable[[float], None] = time.sleep,
     now_provider: Callable[[], datetime] = datetime.now,
 ) -> int:
@@ -97,6 +120,14 @@ def main(
             sleep_func=sleep_func,
             now_provider=now_provider,
         )
+
+    if args.command == "dashboard":
+        dashboard_runner(
+            reports_dir=args.reports_dir,
+            host=args.host,
+            port=args.port,
+        )
+        return 0
 
     parser.error(f"Unknown command: {args.command}")
     return 2

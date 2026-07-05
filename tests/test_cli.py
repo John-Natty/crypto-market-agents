@@ -222,6 +222,37 @@ class CLITests(unittest.TestCase):
         self.assertIn("Mode: reel", output.getvalue())
         self.assertIn("WhatsApp summary: skipped", output.getvalue())
 
+    def test_cli_dashboard_parses_arguments_without_orchestrator(self):
+        factory = ExplodingFactory()
+        dashboard_runner = RecordingDashboardRunner()
+
+        exit_code = main(
+            [
+                "dashboard",
+                "--reports-dir",
+                "reports-test",
+                "--host",
+                "127.0.0.2",
+                "--port",
+                "8123",
+            ],
+            orchestrator_factory=factory,
+            dashboard_runner=dashboard_runner,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(factory.calls, 0)
+        self.assertEqual(
+            dashboard_runner.calls,
+            [
+                {
+                    "reports_dir": "reports-test",
+                    "host": "127.0.0.2",
+                    "port": 8123,
+                }
+            ],
+        )
+
     def run_mock_cli(
         self,
         output_dir,
@@ -313,6 +344,14 @@ class ExplodingFactory:
     def __call__(self, **kwargs):
         self.calls += 1
         raise AssertionError("orchestrator_factory must not be called in mock mode")
+
+
+class RecordingDashboardRunner:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
 
 
 class FakeOrchestrator:

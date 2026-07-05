@@ -188,6 +188,46 @@ Le scheduler affiche le mode utilise, l'intervalle, chaque run, les chemins des
 rapports generes, le risque global, la confidence et le prochain run prevu. Sans
 `--runs`, il continue jusqu'a interruption clavier avec `Ctrl+C`.
 
+## Dashboard Local
+
+Le dashboard local permet de consulter les rapports deja generes dans `reports/`
+sans relancer les agents, sans base de donnees et sans appel API externe.
+
+Generer un rapport de demonstration :
+
+```bash
+crypto-market-agents report --mock
+```
+
+Lancer le dashboard :
+
+```bash
+crypto-market-agents dashboard --reports-dir reports
+```
+
+Par defaut, il est disponible sur :
+
+```text
+http://127.0.0.1:8000
+```
+
+Options disponibles :
+
+```bash
+crypto-market-agents dashboard --reports-dir reports --host 127.0.0.1 --port 8000
+```
+
+Commandes Makefile :
+
+```bash
+make dashboard
+make dashboard-mock
+```
+
+Le dashboard lit seulement les fichiers `.json`, `.html` et `.md` du dossier
+configure. Il n'appelle pas CoinGecko, NewsAPI, DefiLlama ou WhatsApp, et il
+n'envoie jamais de notification.
+
 ## Agents Disponibles
 
 ### PriceMarketAgent
@@ -491,6 +531,7 @@ Ces scripts utilisent des donnees factices :
 - `scripts/test_orchestrator_mock.py` : lance `CryptoMarketOrchestrator` avec des agents factices.
 - `scripts/test_cli_mock.py` : lance la CLI officielle en mode mock, sans API externe.
 - `scripts/test_scheduler_mock.py` : lance le scheduler local en mode mock, sans API externe.
+- `scripts/test_dashboard_mock.py` : genere un rapport mock et verifie le rendu dashboard sans serveur long-running.
 
 Exemple :
 
@@ -863,7 +904,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - WhatsApp limite aux messages texte simples.
 - Pas encore de templates WhatsApp.
 - Pas de webhook entrant.
-- Pas de dashboard.
+- Dashboard local disponible, sans authentification ni usage production.
 - Pas de planification automatique de rapports.
 
 ## Ameliorations Futures
@@ -873,7 +914,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Ajouter d'autres versions Python a la matrice si necessaire.
 - Augmenter progressivement le seuil de couverture si la base de tests continue de se stabiliser.
 - Ajouter un scan Docker avance dans une etape separee si necessaire.
-- Ajouter un dashboard.
+- Enrichir le dashboard local si le besoin apparait.
 - Enrichir progressivement les dictionnaires de sentiment et les jeux de tests.
 - Ajouter GDELT comme fallback news.
 - Ajouter des rapports planifies.

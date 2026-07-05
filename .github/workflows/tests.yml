@@ -75,6 +75,9 @@ jobs:
       - name: Run mock scheduler
         run: python3 scripts/test_scheduler_mock.py
 
+      - name: Run mock dashboard
+        run: python3 scripts/test_dashboard_mock.py
+
   docker:
     name: Docker build
     runs-on: ubuntu-latest

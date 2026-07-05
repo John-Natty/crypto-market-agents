@@ -255,6 +255,29 @@ reports/report_YYYY-MM-DD_HHMM.html
 
 En mode mock, les fichiers utilisent un prefixe `mock_report_`.
 
+## Dashboard Local
+
+`src/crypto_market_agents/dashboard.py` fournit un dashboard local leger base
+sur la bibliotheque standard Python (`http.server`, `pathlib`, `json`, `html`
+et `urllib.parse`).
+
+Le dashboard :
+
+- lit uniquement les rapports deja presents dans `reports/` ou le dossier passe
+  via `--reports-dir` ;
+- liste les fichiers `.json`, `.html` et `.md` autorises ;
+- affiche une page d'accueil avec les rapports disponibles, le risque global,
+  la confidence, le nombre de findings, le nombre d'assets et les liens vers les
+  formats disponibles ;
+- affiche une page detail pour un rapport JSON ;
+- ne relance aucun agent ;
+- n'appelle pas CoinGecko, NewsAPI, DefiLlama ou WhatsApp ;
+- ne stocke rien en base de donnees.
+
+La resolution des chemins interdit le path traversal et limite les lectures au
+dossier de rapports. Le contenu dynamique est echappe avant rendu HTML. Ce
+dashboard est un outil local de consultation, pas un dashboard de production.
+
 ## Securite
 
 Le projet applique une posture stricte :
@@ -325,7 +348,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 
 - Analyse sentiment ponderee par dictionnaires explicables, sans modele IA.
 - Cache fichier simple disponible, sans invalidation avancee ni partage distribue.
-- Pas de dashboard.
+- Dashboard local disponible, sans authentification ni usage production.
 - Scheduler local simple, pas de service de production.
 - WhatsApp limite aux messages texte simples.
 - Pas de templates WhatsApp.
@@ -334,7 +357,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 
 ## Ameliorations Futures
 
-- Ajouter un dashboard.
+- Enrichir le dashboard local si le besoin apparait.
 - Ajouter un scheduler de production seulement si le besoin apparait.
 - Ajouter GDELT comme fallback news.
 - Enrichir les dictionnaires de sentiment et les cas de test.
