@@ -183,8 +183,8 @@ texte optionnel. Il ne gere pas de trading, wallet, paiement ou transfert.
   et proximite high/low 24h.
 - `VolatilityRiskAgent` analyse amplitude 24h, variations absolues, ratio volume
   sur market cap et signaux de risque.
-- `NewsSentimentAgent` analyse les actualites avec des regles simples de
-  mots-cles positifs, negatifs et de risque.
+- `NewsSentimentAgent` analyse les actualites avec un scoring pondere
+  explicable, sans IA externe ni dependance lourde.
 - `OnchainFundamentalAgent` analyse les donnees DefiLlama disponibles :
   protocoles, TVL, chains, stablecoins et fees/revenue.
 - `FinalSynthesisAgent` compare les rapports, detecte des contradictions simples
@@ -192,6 +192,27 @@ texte optionnel. Il ne gere pas de trading, wallet, paiement ou transfert.
 
 Chaque agent specialise reste responsable de son interpretation locale. La
 synthese finale agrege ensuite ces interpretations dans un format commun.
+
+### NewsSentimentAgent
+
+`NewsSentimentAgent` transforme chaque article en analyse interne explicable :
+
+- normalisation du texte depuis `title`, `description` et `content` ;
+- detection de categories : adoption, institutional, regulation, security,
+  market_stress, legal, technical, macro et neutral ;
+- scoring pondere par mots-cles positifs et negatifs ;
+- ajustement leger par intensite avec `major`, `massive`, `severe`,
+  `emergency`, `critical`, ou au contraire `minor`, `limited`, `partial`,
+  `moderate` ;
+- extraction d'assets connus avec limites de mots pour eviter les faux positifs
+  evidents, par exemple `sol` dans `solution` ;
+- production d'un sentiment par article et d'un sentiment global
+  `positive`, `negative`, `mixed` ou `neutral`.
+
+Les signaux de risque eleve couvrent notamment hack, exploit, security breach,
+ban, crackdown, lawsuit, investigation, fraud, crash, liquidation, bankruptcy et
+insolvency. L'agent reste deterministe et testable : aucun appel OpenAI,
+HuggingFace ou autre service IA n'est utilise.
 
 ## Schemas De Donnees
 
@@ -215,10 +236,14 @@ Le reporting produit trois formats complementaires :
 
 - Markdown pour une lecture humaine simple ;
 - JSON pour une exploitation automatique, des tests ou une integration future ;
-- HTML autonome pour une lecture plus professionnelle dans un navigateur.
+- HTML autonome pour une lecture plus professionnelle dans un navigateur, avec
+  visualisations CSS simples.
 
 Le HTML contient son CSS integre. Il ne depend pas d'un framework, d'un CDN ou
-d'un JavaScript externe.
+d'un JavaScript externe. Les visualisations restent statiques : carte de resume
+global, barre de confidence, repartition des risques par agent, confidence par
+agent et findings regroupes par niveau de risque. Ce n'est pas un dashboard
+interactif.
 
 Les rapports sont sauvegardes dans `reports/` par defaut :
 
@@ -298,7 +323,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 
 ## Limites Actuelles
 
-- Analyse sentiment simple par mots-cles.
+- Analyse sentiment ponderee par dictionnaires explicables, sans modele IA.
 - Cache fichier simple disponible, sans invalidation avancee ni partage distribue.
 - Pas de dashboard.
 - Scheduler local simple, pas de service de production.
@@ -312,7 +337,7 @@ Les tests ne doivent pas appeler CoinGecko, NewsAPI, DefiLlama ou WhatsApp reels
 - Ajouter un dashboard.
 - Ajouter un scheduler de production seulement si le besoin apparait.
 - Ajouter GDELT comme fallback news.
-- Ameliorer l'analyse sentiment.
+- Enrichir les dictionnaires de sentiment et les cas de test.
 - Ajouter des strategies de cache plus avancees si le besoin apparait.
 - Ajouter des metriques d'execution.
 - Ajouter un scan Docker avance.

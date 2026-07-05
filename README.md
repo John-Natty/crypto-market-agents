@@ -9,7 +9,7 @@ Le projet est strictement oriente analyse. Il ne fait pas de trading automatique
 Crypto Market Agents combine plusieurs sources de donnees pour produire une vue lisible du marche crypto :
 
 - CoinGecko pour les prix, volumes, market cap et variations de marche ;
-- NewsAPI pour les actualites crypto et une analyse de sentiment simple ;
+- NewsAPI pour les actualites crypto et une analyse de sentiment ponderee explicable ;
 - DefiLlama pour les donnees DeFi et fondamentales publiques ;
 - WhatsApp Cloud API en option pour envoyer un resume ou une alerte de risque.
 
@@ -23,7 +23,7 @@ et notification courte.
 - Clients API lecture seule pour CoinGecko, NewsAPI et DefiLlama.
 - Agents specialises produisant des `AgentReport`.
 - Agent de synthese finale produisant un `FinalReport`.
-- Rendu du rapport final en Markdown, JSON et HTML autonome.
+- Rendu du rapport final en Markdown, JSON et HTML autonome avec visualisations CSS simples.
 - Notification WhatsApp optionnelle, desactivee par defaut.
 - Orchestrateur global et premiere commande CLI.
 - Mode mock officiel pour demo complete sans API externe.
@@ -112,7 +112,9 @@ reports/report_YYYY-MM-DD_HHMM.html
 ```
 
 Le fichier HTML est autonome : il contient son CSS integre et ne necessite pas
-Internet, CDN ou JavaScript externe.
+Internet, CDN ou JavaScript externe. Il inclut des visualisations simples :
+cartes de synthese, barre de confidence globale, repartition des risques par
+agent, confidence par agent et findings regroupes par niveau de risque.
 
 ## Mode Mock / Demo Sans API
 
@@ -212,14 +214,16 @@ Analyse la volatilite et les risques de marche :
 
 ### NewsSentimentAgent
 
-Analyse les actualites crypto depuis NewsAPI avec des regles simples de mots-cles :
+Analyse les actualites crypto depuis NewsAPI avec un scoring pondere explicable :
 
-- signaux positifs ;
-- signaux negatifs ;
-- risques de hack, exploit, liquidation ou regulation ;
-- sentiment global simple.
+- categories de signaux : adoption, institutional, regulation, security, market_stress, legal, technical, macro, neutral ;
+- mots-cles positifs et negatifs avec poids differencies ;
+- intensite forte ou faible pour ajuster legerement les scores ;
+- detection de risques sensibles : hack, exploit, security breach, liquidation, crackdown, insolvency, bankruptcy ;
+- extraction d'assets mentionnes dans les articles avec regex a limites de mots ;
+- sentiment global `positive`, `negative`, `mixed` ou `neutral`.
 
-Cette version n'utilise pas encore de modele IA pour le sentiment.
+Cette analyse n'utilise pas d'IA externe, pas OpenAI, pas HuggingFace et pas de dependance lourde. Elle reste une aide pedagogique d'analyse, pas un conseil financier.
 
 ### OnchainFundamentalAgent
 
@@ -853,7 +857,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Securite GitHub legere avec Dependabot et CodeQL.
 - Docker disponible en version simple, sans publication d'image ni registry.
 - Coverage disponible avec seuil progressif de 80 %.
-- Analyse sentiment simple par mots-cles.
+- Analyse sentiment ponderee par dictionnaires explicables, sans IA externe.
 - Extraction assets/protocoles rule-based.
 - Donnees live dependantes des APIs externes.
 - WhatsApp limite aux messages texte simples.
@@ -870,7 +874,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Augmenter progressivement le seuil de couverture si la base de tests continue de se stabiliser.
 - Ajouter un scan Docker avance dans une etape separee si necessaire.
 - Ajouter un dashboard.
-- Ajouter une meilleure analyse sentiment.
+- Enrichir progressivement les dictionnaires de sentiment et les jeux de tests.
 - Ajouter GDELT comme fallback news.
 - Ajouter des rapports planifies.
 - Ajouter des retries et rate-limits avances.

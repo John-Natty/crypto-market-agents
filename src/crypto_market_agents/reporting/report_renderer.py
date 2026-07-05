@@ -6,7 +6,13 @@ from html import escape
 import json
 from pathlib import Path
 
-from crypto_market_agents.schemas import FinalReport, RiskLevel
+from crypto_market_agents.schemas import (
+    AgentFinding,
+    AgentReport,
+    FinalReport,
+    ImpactDirection,
+    RiskLevel,
+)
 
 
 DISCLAIMER = "Analyse informative uniquement, pas un conseil financier."
@@ -108,8 +114,15 @@ def render_final_report_html(final_report: FinalReport) -> str:
             f'        <span class="confidence">Confiance {_html(_percent(final_report.confidence))}</span>',
             "      </div>",
             "    </header>",
+            _section("Synthese globale", _summary_metrics_html(final_report)),
+            _section(
+                "Confiance globale",
+                _render_confidence_bar(final_report.confidence, "Confiance globale"),
+            ),
+            _section("Repartition des risques par agent", _risk_distribution_html(final_report)),
+            _section("Confidence par agent", _agent_confidence_cards_html(final_report)),
             _section("Resume du marche", f"<p>{_html(final_report.market_summary)}</p>"),
-            _section("Findings cles", _findings_html(final_report)),
+            _section("Findings cles par niveau de risque", _grouped_findings_html(final_report)),
             _section("Assets et protocoles a surveiller", _list_html(final_report.assets_to_watch)),
             _section("Warnings", _list_html(final_report.warnings)),
             _section("Contradictions", _list_html(final_report.contradictions)),
@@ -159,6 +172,33 @@ def _section(title: str, body: str) -> str:
     )
 
 
+def _summary_metrics_html(final_report: FinalReport) -> str:
+    metrics = (
+        (
+            "Risque global",
+            final_report.global_risk_level.value,
+            _risk_class(final_report.global_risk_level),
+        ),
+        ("Confiance", _percent(final_report.confidence), ""),
+        ("Findings cles", str(len(final_report.key_findings)), ""),
+        ("Assets / protocoles", str(len(final_report.assets_to_watch)), ""),
+        ("Warnings", str(len(final_report.warnings)), ""),
+    )
+    cards = []
+    for label, value, risk_class in metrics:
+        classes = "metric-card"
+        if risk_class:
+            classes = f"{classes} {risk_class}"
+        cards.append(
+            f'<div class="{_html(classes)}">'
+            f"<span>{_html(label)}</span>"
+            f"<strong>{_html(value)}</strong>"
+            "</div>"
+        )
+
+    return f'<div class="metric-grid">{"".join(cards)}</div>'
+
+
 def _findings_html(final_report: FinalReport) -> str:
     if not final_report.key_findings:
         return '<p class="empty">Aucun finding cle.</p>'
@@ -174,6 +214,44 @@ def _findings_html(final_report: FinalReport) -> str:
         )
 
     return f'<ul class="finding-list">{"".join(items)}</ul>'
+
+
+def _grouped_findings_html(final_report: FinalReport) -> str:
+    groups = _group_findings_by_risk(final_report)
+    if not any(groups.values()):
+        return '<p class="empty">Aucun finding cle.</p>'
+
+    sections = []
+    for level in (RiskLevel.CRITICAL, RiskLevel.HIGH, RiskLevel.MEDIUM, RiskLevel.LOW):
+        findings = groups[level]
+        if not findings:
+            continue
+
+        cards = []
+        for finding in findings:
+            symbols = (
+                f'<span class="finding-symbols">{_html(", ".join(finding.symbols))}</span>'
+                if finding.symbols
+                else ""
+            )
+            cards.append(
+                f'<article class="finding-card {_risk_class(level)}">'
+                f"<h3>{_html(finding.title)}</h3>"
+                f"{symbols}"
+                f"<p>{_html(finding.description)}</p>"
+                f"<small>Impact {_html(finding.impact.value)} · "
+                f"Confiance {_html(_percent(finding.confidence_score))}</small>"
+                "</article>"
+            )
+
+        sections.append(
+            '<div class="finding-group">'
+            f'<h3><span class="risk-badge {_risk_class(level)}">{_html(level.value)}</span></h3>'
+            f'<div class="finding-grid">{"".join(cards)}</div>'
+            "</div>"
+        )
+
+    return "".join(sections)
 
 
 def _agent_reports_html(final_report: FinalReport) -> str:
@@ -205,6 +283,47 @@ def _agent_reports_html(final_report: FinalReport) -> str:
     )
 
 
+def _risk_distribution_html(final_report: FinalReport) -> str:
+    counts = _count_agent_risks(final_report.agent_reports)
+    total = max(sum(counts.values()), 1)
+    bars = []
+    for level in (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL):
+        count = counts[level]
+        width = _format_percent(count / total)
+        bars.append(
+            '<div class="risk-row">'
+            f'<span class="risk-badge {_risk_class(level)}">{_html(level.value)}</span>'
+            '<div class="risk-meter">'
+            f'<span class="{_html(_risk_class(level))}" style="width: {_html(width)}"></span>'
+            "</div>"
+            f"<strong>{_html(count)}</strong>"
+            "</div>"
+        )
+
+    return f'<div class="risk-distribution">{"".join(bars)}</div>'
+
+
+def _agent_confidence_cards_html(final_report: FinalReport) -> str:
+    if not final_report.agent_reports:
+        return '<p class="empty">Aucun rapport agent joint.</p>'
+
+    cards = []
+    for report in final_report.agent_reports:
+        cards.append(
+            f'<article class="agent-card {_risk_class(report.risk_level)}">'
+            '<div class="agent-card-head">'
+            f"<h3>{_html(report.agent_name)}</h3>"
+            f'<span class="risk-badge {_risk_class(report.risk_level)}">'
+            f"{_html(report.risk_level.value)}</span>"
+            "</div>"
+            f'<p class="agent-status">Statut: {_html(report.status.value)}</p>'
+            f"{_render_confidence_bar(report.confidence, report.agent_name)}"
+            "</article>"
+        )
+
+    return f'<div class="agent-grid">{"".join(cards)}</div>'
+
+
 def _list_html(values: tuple[str, ...]) -> str:
     if not values:
         return '<p class="empty">Aucun element specifique.</p>'
@@ -218,6 +337,74 @@ def _html(value: object) -> str:
 
 def _percent(value: float) -> str:
     return f"{value * 100:.0f}%"
+
+
+def _format_percent(value: float) -> str:
+    normalized = max(0.0, min(1.0, value))
+    return f"{normalized * 100:.0f}%"
+
+
+def _render_confidence_bar(value: float, label: str) -> str:
+    percent = _format_percent(value)
+    return (
+        '<div class="confidence-bar" role="img" '
+        f'aria-label="{_html(label)} {_html(percent)}">'
+        '<div class="confidence-track">'
+        f'<span class="confidence-fill" style="width: {_html(percent)}"></span>'
+        "</div>"
+        f"<strong>{_html(percent)}</strong>"
+        "</div>"
+    )
+
+
+def _count_agent_risks(agent_reports: tuple[AgentReport, ...]) -> dict[RiskLevel, int]:
+    counts = {level: 0 for level in RiskLevel}
+    for report in agent_reports:
+        counts[report.risk_level] += 1
+
+    return counts
+
+
+def _group_findings_by_risk(
+    final_report: FinalReport,
+) -> dict[RiskLevel, list[AgentFinding]]:
+    groups: dict[RiskLevel, list[AgentFinding]] = {level: [] for level in RiskLevel}
+    for finding in final_report.key_findings:
+        groups[_finding_risk_level(finding, final_report.global_risk_level)].append(finding)
+
+    return groups
+
+
+def _finding_risk_level(finding: AgentFinding, fallback: RiskLevel) -> RiskLevel:
+    explicit_level = finding.data.get("risk_level") or finding.data.get("level")
+    if explicit_level:
+        try:
+            return RiskLevel(str(explicit_level).lower())
+        except ValueError:
+            pass
+
+    text = f"{finding.title} {finding.description}".lower()
+    if any(word in text for word in ("critical", "hack", "exploit", "security breach")):
+        return RiskLevel.CRITICAL
+    if any(word in text for word in ("high", "liquidation", "crackdown", "crash")):
+        return RiskLevel.HIGH
+    if finding.impact in {ImpactDirection.BEARISH, ImpactDirection.MIXED}:
+        if finding.confidence_score >= 0.80:
+            return RiskLevel.HIGH
+        return RiskLevel.MEDIUM
+    if fallback in {RiskLevel.HIGH, RiskLevel.CRITICAL} and finding.confidence_score >= 0.90:
+        return RiskLevel.MEDIUM
+
+    return RiskLevel.LOW
+
+
+def _risk_class(risk_level: RiskLevel | str) -> str:
+    try:
+        level = RiskLevel(str(risk_level).lower())
+    except ValueError:
+        level = RiskLevel.MEDIUM
+
+    return f"risk-{level.value}"
 
 
 def _html_styles() -> str:
@@ -240,6 +427,7 @@ def _html_styles() -> str:
       --muted: #5b6475;
       --line: #d9dee8;
       --accent: #14532d;
+      --track: #e5eaf2;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -322,6 +510,90 @@ def _html_styles() -> str:
       letter-spacing: 0;
     }}
     {risk_rules}
+    .metric-grid, .agent-grid, .finding-grid {{
+      display: grid;
+      gap: 12px;
+    }}
+    .metric-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    }}
+    .metric-card, .agent-card, .finding-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #ffffff;
+    }}
+    .metric-card span {{
+      display: block;
+      color: var(--muted);
+      font-size: 0.86rem;
+      margin-bottom: 4px;
+    }}
+    .metric-card strong {{
+      display: block;
+      font-size: 1.35rem;
+    }}
+    .confidence-bar {{
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 12px;
+    }}
+    .confidence-track, .risk-meter {{
+      width: 100%;
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--track);
+    }}
+    .confidence-fill {{
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #0f766e, #2563eb);
+    }}
+    .risk-distribution {{
+      display: grid;
+      gap: 10px;
+    }}
+    .risk-row {{
+      display: grid;
+      grid-template-columns: 110px 1fr 32px;
+      gap: 10px;
+      align-items: center;
+    }}
+    .risk-meter span {{
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+    }}
+    .agent-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }}
+    .agent-card-head {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }}
+    .agent-card h3, .finding-card h3, .finding-group h3 {{
+      margin: 0 0 8px;
+      font-size: 1rem;
+    }}
+    .agent-status, .finding-symbols, .finding-card small {{
+      color: var(--muted);
+      font-size: 0.9rem;
+    }}
+    .finding-group + .finding-group {{
+      margin-top: 18px;
+    }}
+    .finding-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }}
+    .finding-card p {{
+      margin: 8px 0;
+    }}
     .table-wrap {{
       overflow-x: auto;
     }}

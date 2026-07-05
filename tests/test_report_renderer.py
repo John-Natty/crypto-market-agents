@@ -51,7 +51,81 @@ class ReportRendererTests(unittest.TestCase):
         self.assertIn("Confiance", html)
         self.assertIn("Prix globalement stables", html)
         self.assertIn("price_market_agent", html)
+        self.assertIn("Synthese globale", html)
+        self.assertIn("metric-card", html)
+        self.assertIn("confidence-bar", html)
+        self.assertIn("Repartition des risques par agent", html)
+        self.assertIn("Confidence par agent", html)
+        self.assertIn("Findings cles par niveau de risque", html)
         self.assertIn("Analyse informative uniquement, pas un conseil financier", html)
+
+    def test_render_final_report_html_contains_visual_summary_metrics(self):
+        final_report = visual_final_report()
+
+        html = render_final_report_html(final_report)
+
+        self.assertIn("Synthese globale", html)
+        self.assertIn("Risque global", html)
+        self.assertIn("Findings cles", html)
+        self.assertIn("Assets / protocoles", html)
+        self.assertIn("Warnings", html)
+        self.assertIn("metric-grid", html)
+        self.assertIn("risk-high", html)
+
+    def test_render_final_report_html_contains_global_confidence_bar(self):
+        final_report = visual_final_report(confidence=0.72)
+
+        html = render_final_report_html(final_report)
+
+        self.assertIn("Confiance globale", html)
+        self.assertIn("confidence-bar", html)
+        self.assertIn('aria-label="Confiance globale 72%"', html)
+        self.assertIn('style="width: 72%"', html)
+
+    def test_render_final_report_html_contains_agent_risk_distribution(self):
+        final_report = visual_final_report()
+
+        html = render_final_report_html(final_report)
+
+        self.assertIn("Repartition des risques par agent", html)
+        self.assertIn("risk-distribution", html)
+        self.assertIn(">low</span>", html)
+        self.assertIn(">medium</span>", html)
+        self.assertIn(">high</span>", html)
+        self.assertIn(">critical</span>", html)
+        self.assertIn('class="risk-badge risk-critical"', html)
+
+    def test_render_final_report_html_contains_agent_confidence_cards(self):
+        final_report = visual_final_report()
+
+        html = render_final_report_html(final_report)
+
+        self.assertIn("Confidence par agent", html)
+        self.assertIn("agent-card", html)
+        self.assertIn("price_market_agent", html)
+        self.assertIn("volatility_risk_agent", html)
+        self.assertIn("Statut: success", html)
+        self.assertIn('aria-label="price_market_agent 80%"', html)
+        self.assertIn('aria-label="volatility_risk_agent 65%"', html)
+
+    def test_render_final_report_html_contains_risk_css_classes(self):
+        html = render_final_report_html(visual_final_report())
+
+        self.assertIn(".risk-low", html)
+        self.assertIn(".risk-medium", html)
+        self.assertIn(".risk-high", html)
+        self.assertIn(".risk-critical", html)
+
+    def test_render_final_report_html_groups_findings_by_risk(self):
+        final_report = visual_final_report()
+
+        html = render_final_report_html(final_report)
+
+        self.assertIn("Findings cles par niveau de risque", html)
+        self.assertIn("finding-group", html)
+        self.assertIn("finding-card risk-critical", html)
+        self.assertIn("Hack critique", html)
+        self.assertIn("Signal positif", html)
 
     def test_render_final_report_json(self):
         final_report = sample_final_report()
@@ -125,8 +199,11 @@ class ReportRendererTests(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertNotIn("<script>alert(2)</script>", html)
         self.assertNotIn("<b>dangereux</b>", html)
+        self.assertNotIn("<img src=x onerror=alert(1)>", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertIn("Description &lt;b&gt;non echappee&lt;/b&gt;", html)
+        self.assertIn("Conclusion &lt;img src=x onerror=alert(1)&gt;", html)
+        self.assertIn("Analyse informative uniquement, pas un conseil financier", html)
 
 
 def sample_final_report():
@@ -146,6 +223,77 @@ def sample_final_report():
         ),
     )
     return FinalSynthesisAgent().synthesize([report])
+
+
+def visual_final_report(confidence=0.86):
+    agent_reports = (
+        AgentReport(
+            agent_name="price_market_agent",
+            status=AgentStatus.SUCCESS,
+            summary="Prix globalement stables.",
+            risk_level=RiskLevel.LOW,
+            confidence=0.80,
+        ),
+        AgentReport(
+            agent_name="volatility_risk_agent",
+            status=AgentStatus.SUCCESS,
+            summary="Volatilite notable.",
+            risk_level=RiskLevel.MEDIUM,
+            confidence=0.65,
+        ),
+        AgentReport(
+            agent_name="news_sentiment_agent",
+            status=AgentStatus.PARTIAL,
+            summary="News negatives.",
+            risk_level=RiskLevel.HIGH,
+            confidence=0.70,
+        ),
+        AgentReport(
+            agent_name="onchain_fundamental_agent",
+            status=AgentStatus.SUCCESS,
+            summary="Signal critique on-chain.",
+            risk_level=RiskLevel.CRITICAL,
+            confidence=0.92,
+        ),
+    )
+    return FinalReport(
+        title="Crypto Market Agents - Rapport final",
+        market_summary="Marche teste avec visualisations.",
+        cryptos_to_watch=("bitcoin", "ethereum"),
+        important_risks=(),
+        confidence_score=confidence,
+        conclusion="Conclusion pedagogique sans conseil financier.",
+        global_risk_level=RiskLevel.HIGH,
+        key_findings=(
+            Finding(
+                title="Hack critique",
+                description="Exploit critique detecte sur un protocole.",
+                impact=ImpactDirection.BEARISH,
+                symbols=("ethereum",),
+                confidence_score=0.92,
+                data={"risk_level": "critical"},
+            ),
+            Finding(
+                title="Risque eleve",
+                description="Liquidation importante detectee.",
+                impact=ImpactDirection.BEARISH,
+                symbols=("bitcoin",),
+                confidence_score=0.84,
+                data={"risk_level": "high"},
+            ),
+            Finding(
+                title="Signal positif",
+                description="Adoption institutionnelle en hausse.",
+                impact=ImpactDirection.BULLISH,
+                symbols=("bitcoin",),
+                confidence_score=0.72,
+                data={"risk_level": "low"},
+            ),
+        ),
+        assets_to_watch=("bitcoin", "ethereum"),
+        warnings=("Risque de volatilite.",),
+        agent_reports=agent_reports,
+    )
 
 
 if __name__ == "__main__":
