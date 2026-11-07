@@ -6,7 +6,9 @@ import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+import json
 import time
 from typing import Any
 
@@ -15,6 +17,15 @@ from crypto_market_agents.dashboard import serve_dashboard
 from crypto_market_agents.file_utils import reserve_report_paths
 from crypto_market_agents.security import redact_text
 from crypto_market_agents.trading.cli import add_paper_parser, run_paper
+from crypto_market_agents.trading.scanner import BitvavoScanner, ScanConfig
+from crypto_market_agents.trading.history_client import BitvavoCandleClient
+from crypto_market_agents.trading.deep_analysis import DeepMarketAnalyzer
+from crypto_market_agents.trading.evaluation import (
+    DeterministicEvaluator,
+    OllamaCandidateEvaluator,
+    build_snapshot,
+    compare_evaluators,
+)
 from crypto_market_agents.mock_data import build_mock_agent_reports
 from crypto_market_agents.notifications.whatsapp_notifier import (
     DEFAULT_MAX_MESSAGE_CHARS,
@@ -45,6 +56,30 @@ class GeneratedReport:
     whatsapp_preview: bool = False
     whatsapp_summary_preview: str | None = None
     whatsapp_alert_preview: str | None = None
+
+
+class _UnavailableCandidateEvaluator:
+    """Explicitly disabled Ollama side for deterministic-only comparisons."""
+
+    def evaluate(self, snapshot):
+        from crypto_market_agents.trading.evaluation import EvaluationResult
+
+        return EvaluationResult(
+            evaluator="ollama",
+            version="candidate-evaluation.v1",
+            status="not_requested",
+            results=tuple(
+                {
+                    "market": candidate["market"],
+                    "label": "abstain",
+                    "justification": "Ollama non demandé; aucun modèle appelé.",
+                    "evidence_refs": [f"{candidate['market']}.data_quality"],
+                }
+                for candidate in snapshot.get("candidates", [])
+            ),
+            duration_ms=0,
+            error=None,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +142,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     add_paper_parser(subparsers)
+    scan = subparsers.add_parser(
+        "scan", help="Présélection en lecture seule des marchés EUR Bitvavo."
+    )
+    scan.add_argument("--min-volume-eur", default="100000")
+    scan.add_argument("--max-spread-pct", default="1")
+    scan.add_argument("--include-unavailable", action="store_true")
+    scan.add_argument("--json", dest="json_path", help="Exporter le résultat JSON vers ce fichier.")
+    deep = subparsers.add_parser(
+        "analyze", help="Analyse historique approfondie, en lecture seule."
+    )
+    deep.add_argument(
+        "--scan-json", default="reports/market-scan.json", help="Résultat JSON de scan existant."
+    )
+    deep.add_argument(
+        "--count", type=int, default=5, help="Nombre de candidats à analyser (défaut: 5)."
+    )
+    deep.add_argument("--interval", choices=("1h", "4h", "1d"), default="1h")
+    deep.add_argument(
+        "--limit",
+        type=int,
+        default=720,
+        help="Bougies demandées par candidat (maximum Bitvavo: 1440).",
+    )
+    deep.add_argument("--json", dest="json_path", default="reports/market-analysis.json")
+    evaluate = subparsers.add_parser(
+        "compare", help="Comparer les évaluateurs watch/avoid/abstain, sans exécution."
+    )
+    evaluate.add_argument("--analysis-json", default="reports/market-analysis.json")
+    evaluate.add_argument("--json", dest="json_path", default="reports/evaluation-comparison.json")
+    evaluate.add_argument(
+        "--with-ollama", action="store_true", help="Inclure le modèle local déjà installé."
+    )
+    evaluate.add_argument("--model", help="Nom d'un modèle Ollama local existant.")
+    evaluate.add_argument("--timeout", type=int, default=45)
     return parser
 
 
@@ -125,6 +194,115 @@ def main(
 
     if args.command == "paper":
         return run_paper(args, sleep_func=sleep_func)
+
+    if args.command == "scan":
+        try:
+            result = BitvavoScanner().scan(
+                ScanConfig(
+                    Decimal(args.min_volume_eur),
+                    Decimal(args.max_spread_pct),
+                    not args.include_unavailable,
+                )
+            )
+        except (ValueError, RuntimeError) as exc:
+            print(f"Scan impossible: {exc}")
+            return 1
+        print("SCAN EUR BITVAVO | lecture seule — aucun achat")
+        for index, candidate in enumerate(result["candidates"], 1):
+            print(
+                f"{index:>3}. {candidate['market']} | score {candidate['score']} | volume {candidate['volume_quote_24h_eur']} EUR | variation {candidate['price_change_24h_pct']}% | spread {candidate['spread_pct']}%"
+            )
+        print(f"Rejetés: {len(result['rejected'])}")
+        if args.json_path:
+            Path(args.json_path).write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            print(f"JSON: {args.json_path}")
+        return 0
+
+    if args.command == "analyze":
+        try:
+            if args.count < 1 or not 1 <= args.limit <= 1440:
+                raise ValueError("count doit être positif et limit entre 1 et 1440.")
+            scan_result = json.loads(Path(args.scan_json).read_text(encoding="utf-8"))
+            if not isinstance(scan_result, dict) or not isinstance(
+                scan_result.get("candidates"), list
+            ):
+                raise ValueError("Fichier de scan invalide ou sans candidats.")
+            rejected = scan_result.get("rejected", [])
+            if not isinstance(rejected, list):
+                raise ValueError("Liste rejected du scan invalide.")
+            result = DeepMarketAnalyzer(BitvavoCandleClient(), now_provider=now_provider).analyze(
+                scan_result, count=args.count, interval=args.interval, limit=args.limit
+            )
+            Path(args.json_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.json_path).write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+            print(f"Analyse impossible: {exc}")
+            return 1
+        print("ANALYSE HISTORIQUE BITVAVO | lecture seule — aucun ordre, aucune décision LLM")
+        for item in result["candidates"]:
+            print(f"{item['market']} | {item['disposition']}")
+            metrics = item.get("metrics", {})
+            print(
+                f"  clôtures: {item.get('data_sufficiency', {}).get('closed_candles', 0)} | variation 24h: {metrics.get('returns_pct', {}).get('24h', 'insuffisante')}% | volatilité: {metrics.get('return_volatility_pct_per_interval', 'insuffisante')}% par {args.interval}"
+            )
+            for reason in item.get("reasons", []):
+                print(f"  - {reason}")
+        print(f"JSON: {args.json_path}")
+        return 0
+
+    if args.command == "compare":
+        try:
+            report = json.loads(Path(args.analysis_json).read_text(encoding="utf-8"))
+            if not isinstance(report, dict) or not isinstance(report.get("candidates"), list):
+                raise ValueError("Rapport d'analyse invalide.")
+            if args.timeout <= 0:
+                raise ValueError("Le timeout doit être positif.")
+            snapshot_path = Path(args.analysis_json).with_name("analysis-snapshot.json")
+            if snapshot_path.exists():
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                from crypto_market_agents.trading.evaluation import verify_snapshot
+
+                if not verify_snapshot(snapshot):
+                    raise ValueError("Snapshot existant altéré ou invalide.")
+                if snapshot.get("source_report_generated_at") != report.get("generated_at"):
+                    raise ValueError("Snapshot associé à un autre rapport d'analyse.")
+            else:
+                snapshot = build_snapshot(report)
+                snapshot_path.write_text(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            if args.with_ollama:
+                if not args.model:
+                    raise ValueError("--with-ollama exige --model avec un modèle local existant.")
+                llm_evaluator = OllamaCandidateEvaluator(args.model, timeout=args.timeout)
+            else:
+                llm_evaluator = _UnavailableCandidateEvaluator()
+            result = compare_evaluators(snapshot, DeterministicEvaluator(), llm_evaluator)
+            result["snapshot_path"] = str(snapshot_path)
+            Path(args.json_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.json_path).write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+            print(f"Comparaison impossible: {exc}")
+            return 1
+        print("COMPARAISON D'ÉVALUATEURS | lecture seule — aucun ordre")
+        print(f"Snapshot: {snapshot['snapshot_id']} | SHA-256: {snapshot['content_sha256']}")
+        for row in result["comparison"]:
+            left = row["deterministic"]["label"] if row["deterministic"] else "absent"
+            right = row["ollama"]["label"] if row["ollama"] else "absent"
+            print(
+                f"{row['market']}: règles={left} | Ollama={right} | {'accord' if row['agreement'] else 'divergence'}"
+            )
+        print(
+            f"Accords: {result['summary']['agreements']} | divergences: {result['summary']['divergences']}"
+        )
+        print(f"JSON: {args.json_path}")
+        return 0
 
     if args.command == "report":
         report = _generate_report(args, orchestrator_factory)
