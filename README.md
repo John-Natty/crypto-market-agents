@@ -1,8 +1,27 @@
 # Crypto Market Agents
 
-Projet Python multi-agents pour analyser le marche crypto a partir de donnees publiques, produire un rapport final clair, et envoyer en option un resume WhatsApp.
+Projet Python multi-agents pour analyser le marche crypto, produire des rapports et experimenter des decisions avec un portefeuille simule de 50 EUR. Une IA locale Ollama peut proposer les operations; un moteur independant controle les risques et simule les executions.
 
-Le projet est strictement oriente analyse. Il ne fait pas de trading automatique, ne connecte aucun wallet, ne demande aucune cle privee crypto et n'execute jamais d'ordre d'achat ou de vente.
+Le projet ne fait aucun trading reel, ne connecte aucun wallet et ne demande aucune cle privee crypto. Les achats et ventes du mode `paper` sont exclusivement fictifs.
+
+
+## Nouveau : portefeuille simule et IA locale
+
+```bash
+crypto-market-agents paper init --state paper/demo.json
+crypto-market-agents paper run --state paper/demo.json --mock --runs 3 --interval-seconds 0
+crypto-market-agents paper status --state paper/demo.json
+```
+
+Cette demonstration utilise une strategie temoin par regles, explicitement sans
+IA. Elle conserve les soldes, les frais et un journal de decisions. Le connecteur
+Ollama permet ensuite de tester un vrai modele local avec `--provider ollama
+--model NOM_MODELE_LOCAL`. Les cours publics Bitvavo sont disponibles via un
+portefeuille initialise avec `--source bitvavo`; aucune cle d'exchange n'est
+necessaire et aucun ordre reel n'est envoye.
+
+Guide complet, limites, reprise et commandes : [Paper trading](docs/PAPER_TRADING.md).
+`init` refuse d'ecraser un etat existant; reutiliser `run` pour continuer.
 
 ## Objectif Du Projet
 
@@ -192,8 +211,26 @@ rapports generes, le risque global, la confidence et le prochain run prevu. Sans
 
 ## Dashboard Local
 
-Le dashboard local permet de consulter les rapports deja generes dans `reports/`
-sans relancer les agents, sans base de donnees et sans appel API externe.
+Le dashboard local permet de suivre un portefeuille simule en direct et de
+consulter les rapports deja generes, sans base de donnees.
+
+Pour suivre un portefeuille deja initialise :
+
+```bash
+crypto-market-agents dashboard --state paper/bitvavo.json
+```
+
+Ouvrir **http://127.0.0.1:8000**. La page se rafraichit toutes les 2 secondes et
+affiche soldes, positions, performance, decisions motivees et etape du moteur.
+Le moteur `paper run` doit fonctionner dans un autre terminal. Les cours et
+la valorisation correspondent au dernier cycle, avec leur age visible.
+La colonne de droite du terminal **Vector** integre la discussion avec le modele local
+de la simulation pour expliquer les decisions et le portefeuille. Les messages
+restent dans la session du navigateur ; chaque question utilise un etat actualise.
+Voir le [guide de suivi en direct](docs/PAPER_TRADING.md#page-de-suivi-en-direct)
+pour demarrer la simulation IA ou une demonstration hors ligne.
+
+Pour consulter uniquement les rapports :
 
 Generer un rapport de demonstration :
 
@@ -226,9 +263,9 @@ make dashboard
 make dashboard-mock
 ```
 
-Le dashboard lit seulement les fichiers `.json`, `.html` et `.md` du dossier
-configure. Il n'appelle pas CoinGecko, NewsAPI, DefiLlama ou WhatsApp, et il
-n'envoie jamais de notification.
+Le dashboard lit les rapports `.json`, `.html` et `.md` du dossier configure,
+ainsi que le portefeuille et son activite lorsque `--state` est fourni. Il ne
+declenche aucun appel API externe, aucune decision et aucune notification.
 
 ## Agents Disponibles
 
@@ -906,6 +943,7 @@ Le projet applique une posture lecture seule :
 - tests sans appel reel aux APIs externes ;
 - erreurs et resultats ne doivent pas exposer de token.
 
+Les simulations ne desactivent pas les protections contre le trading reel.
 Les garde-fous refusent les variables sensibles de type private key, seed phrase, trading active ou retrait active.
 
 ## Limites Actuelles
@@ -924,7 +962,7 @@ Les garde-fous refusent les variables sensibles de type private key, seed phrase
 - Pas encore de templates WhatsApp.
 - Pas de webhook entrant.
 - Dashboard local disponible, sans authentification ni usage production.
-- Pas de planification automatique de rapports.
+- Planification locale disponible; pas de service de production supervise.
 
 ## Ameliorations Futures
 

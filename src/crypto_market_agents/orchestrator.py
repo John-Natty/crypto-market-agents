@@ -20,6 +20,7 @@ from crypto_market_agents.clients.coingecko_client import CoinGeckoClient
 from crypto_market_agents.clients.defillama_client import DefiLlamaClient
 from crypto_market_agents.clients.news_client import NewsClient
 from crypto_market_agents.config import AppConfig, load_config
+from crypto_market_agents.file_utils import reserve_report_paths
 from crypto_market_agents.notifications.whatsapp_client import NotificationResult, WhatsAppClient
 from crypto_market_agents.notifications.whatsapp_notifier import ReportPaths, WhatsAppNotifier
 from crypto_market_agents.reporting.report_renderer import (
@@ -129,11 +130,11 @@ class CryptoMarketOrchestrator:
         self,
         *,
         coin_ids: list[str] | Sequence[str] | None = None,
-        vs_currency: str = "usd",
+        vs_currency: str | None = None,
         news_query: str | None = None,
-        news_language: str = "en",
+        news_language: str | None = None,
         protocol_slugs: list[str] | Sequence[str] | None = None,
-        output_dir: str | Path = "reports",
+        output_dir: str | Path | None = None,
         notify_whatsapp: bool = True,
     ) -> FinalReport:
         """Run every agent, synthesize the final report, and save Markdown/JSON/HTML."""
@@ -155,7 +156,9 @@ class CryptoMarketOrchestrator:
         )
 
         final_report = self.final_synthesis_agent.synthesize(agent_reports)
-        markdown_path, json_path, html_path = self._save_reports(final_report, output_dir)
+        markdown_path, json_path, html_path = self._save_reports(
+            final_report, output_dir or self.config.report_output_dir
+        )
         report_paths = ReportPaths(
             markdown_path=markdown_path,
             json_path=json_path,
@@ -255,13 +258,11 @@ class CryptoMarketOrchestrator:
         target_dir = Path(output_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
         timestamp = self.now_provider().strftime("%Y-%m-%d_%H%M")
-        markdown_path = target_dir / f"report_{timestamp}.md"
-        json_path = target_dir / f"report_{timestamp}.json"
-        html_path = target_dir / f"report_{timestamp}.html"
-
-        save_markdown_report(final_report, str(markdown_path))
-        save_json_report(final_report, str(json_path))
-        save_html_report(final_report, str(html_path))
+        with reserve_report_paths(target_dir, f"report_{timestamp}") as paths:
+            markdown_path, json_path, html_path = paths
+            save_markdown_report(final_report, str(markdown_path))
+            save_json_report(final_report, str(json_path))
+            save_html_report(final_report, str(html_path))
 
         return markdown_path, json_path, html_path
 

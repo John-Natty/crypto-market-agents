@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import sys
@@ -27,16 +28,27 @@ from crypto_market_agents.reporting.report_renderer import (
 from crypto_market_agents.schemas import AgentStatus, RiskLevel
 
 
+TEST_NOW = datetime.fromisoformat("2026-07-01T12:05:00+00:00")
+
+
 class FullAnalysisFlowTests(unittest.TestCase):
     def test_full_analysis_flow_with_mocks_and_no_external_calls(self):
         market_client = FakeMarketClient()
         news_client = FakeNewsClient()
         fundamental_client = FakeFundamentalClient()
 
-        price_report = PriceMarketAgent(market_client).analyze(["bitcoin", "ethereum"])
-        volatility_report = VolatilityRiskAgent(market_client).analyze(["bitcoin", "ethereum"])
-        news_report = NewsSentimentAgent(news_client).analyze(["bitcoin", "ethereum"])
-        onchain_report = OnchainFundamentalAgent(fundamental_client).analyze(["uniswap", "aave"])
+        price_report = PriceMarketAgent(market_client, now=lambda: TEST_NOW).analyze(
+            ["bitcoin", "ethereum"]
+        )
+        volatility_report = VolatilityRiskAgent(market_client, now=lambda: TEST_NOW).analyze(
+            ["bitcoin", "ethereum"]
+        )
+        news_report = NewsSentimentAgent(news_client, now=lambda: TEST_NOW).analyze(
+            ["bitcoin", "ethereum"]
+        )
+        onchain_report = OnchainFundamentalAgent(fundamental_client, now=lambda: TEST_NOW).analyze(
+            ["uniswap", "aave"]
+        )
 
         reports = (
             price_report,
@@ -191,8 +203,11 @@ class FakeFundamentalClient:
             "category": "Dexes",
             "chains": ["Ethereum", "Arbitrum", "Optimism"],
             "tvl": [
-                {"date": 1, "totalLiquidityUSD": 1_000_000_000},
-                {"date": 2, "totalLiquidityUSD": 1_200_000_000},
+                {
+                    "date": (TEST_NOW - timedelta(days=1)).timestamp(),
+                    "totalLiquidityUSD": 1_000_000_000,
+                },
+                {"date": TEST_NOW.timestamp(), "totalLiquidityUSD": 1_200_000_000},
             ],
         }
 

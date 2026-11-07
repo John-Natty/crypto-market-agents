@@ -78,6 +78,18 @@ jobs:
       - name: Run mock dashboard
         run: python3 scripts/test_dashboard_mock.py
 
+      - name: Run mock paper portfolio
+        run: python3 scripts/test_paper_mock.py
+
+      - name: Test wheel outside checkout
+        run: |
+          python -m pip wheel --no-deps . --wheel-dir /tmp/cma-wheels
+          python -m venv /tmp/cma-installed
+          /tmp/cma-installed/bin/python -m pip install /tmp/cma-wheels/*.whl
+          cd /tmp
+          /tmp/cma-installed/bin/crypto-market-agents paper init --state /tmp/cma-wheel-paper.json
+          /tmp/cma-installed/bin/crypto-market-agents paper run --state /tmp/cma-wheel-paper.json --mock --runs 3 --interval-seconds 0 --output-dir /tmp/cma-wheel-reports
+
   docker:
     name: Docker build
     runs-on: ubuntu-latest
@@ -89,3 +101,6 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t crypto-market-agents .
+
+      - name: Exercise paper portfolio in container
+        run: docker run --rm --network none crypto-market-agents python3 scripts/test_paper_mock.py

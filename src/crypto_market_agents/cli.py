@@ -12,6 +12,9 @@ from typing import Any
 
 from crypto_market_agents.agents.final_synthesis_agent import FinalSynthesisAgent
 from crypto_market_agents.dashboard import serve_dashboard
+from crypto_market_agents.file_utils import reserve_report_paths
+from crypto_market_agents.security import redact_text
+from crypto_market_agents.trading.cli import add_paper_parser, run_paper
 from crypto_market_agents.mock_data import build_mock_agent_reports
 from crypto_market_agents.notifications.whatsapp_notifier import (
     DEFAULT_MAX_MESSAGE_CHARS,
@@ -79,12 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",
-        help="Serve a lightweight local dashboard for existing reports.",
+        help="Afficher les rapports et le suivi en direct du portefeuille simule.",
     )
     dashboard_parser.add_argument(
         "--reports-dir",
         default="reports",
         help="Directory containing generated reports, default: reports.",
+    )
+    dashboard_parser.add_argument(
+        "--state",
+        default=None,
+        help="Fichier du portefeuille simule a suivre en direct (ex. paper/bitvavo.json).",
     )
     dashboard_parser.add_argument(
         "--host",
@@ -98,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Port for the local dashboard, default: 8000.",
     )
 
+    add_paper_parser(subparsers)
     return parser
 
 
@@ -113,6 +122,9 @@ def main(
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "paper":
+        return run_paper(args, sleep_func=sleep_func)
 
     if args.command == "report":
         report = _generate_report(args, orchestrator_factory)
@@ -135,6 +147,7 @@ def main(
             reports_dir=args.reports_dir,
             host=args.host,
             port=args.port,
+            **({"state": args.state} if args.state is not None else {}),
         )
         return 0
 
@@ -151,7 +164,7 @@ def _add_report_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--currency",
-        default="usd",
+        default=None,
         help="Quote currency for market data, default: usd.",
     )
     parser.add_argument(
@@ -161,7 +174,7 @@ def _add_report_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--news-language",
-        default="en",
+        default=None,
         help="News language, default: en.",
     )
     parser.add_argument(
@@ -172,7 +185,7 @@ def _add_report_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="reports",
+        default=None,
         help="Directory where Markdown/JSON/HTML reports are saved.",
     )
     parser.add_argument(
@@ -260,7 +273,9 @@ def _generate_mock_report(args: argparse.Namespace) -> GeneratedReport:
     mock_risk_level = RiskLevel(args.mock_risk_level)
     agent_reports = build_mock_agent_reports(mock_risk_level)
     final_report = FinalSynthesisAgent().synthesize(agent_reports)
-    markdown_path, json_path, html_path = _save_mock_reports(final_report, args.output_dir)
+    markdown_path, json_path, html_path = _save_mock_reports(
+        final_report, args.output_dir or "reports"
+    )
 
     summary_preview, alert_preview = _build_whatsapp_previews(
         final_report,
@@ -305,13 +320,18 @@ def _run_schedule(
         print(f"Runs prevus: {args.runs}")
 
     run_number = 0
+    had_error = False
     try:
         while args.runs is None or run_number < args.runs:
             run_number += 1
             started_at = now_provider()
             print(f"Run {run_number} demarre a {started_at.isoformat(timespec='seconds')}")
-            report = _generate_report(args, orchestrator_factory)
-            _print_generated_report(report)
+            try:
+                report = _generate_report(args, orchestrator_factory)
+                _print_generated_report(report)
+            except (OSError, ValueError, RuntimeError) as exc:
+                had_error = True
+                print(f"Run {run_number} echoue: {redact_text(str(exc))}")
 
             if args.runs is not None and run_number >= args.runs:
                 break
@@ -324,7 +344,7 @@ def _run_schedule(
         return 0
 
     print("Scheduler termine.")
-    return 0
+    return 1 if had_error else 0
 
 
 def _print_generated_report(report: GeneratedReport) -> None:
@@ -351,29 +371,13 @@ def _save_mock_reports(
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    markdown_path, json_path, html_path = _unique_report_paths(
-        target_dir,
-        f"mock_report_{timestamp}",
-    )
-
-    save_markdown_report(final_report, str(markdown_path))
-    save_json_report(final_report, str(json_path))
-    save_html_report(final_report, str(html_path))
+    with reserve_report_paths(target_dir, f"mock_report_{timestamp}") as paths:
+        markdown_path, json_path, html_path = paths
+        save_markdown_report(final_report, str(markdown_path))
+        save_json_report(final_report, str(json_path))
+        save_html_report(final_report, str(html_path))
 
     return markdown_path, json_path, html_path
-
-
-def _unique_report_paths(target_dir: Path, base_name: str) -> tuple[Path, Path, Path]:
-    suffix = ""
-    index = 2
-    while True:
-        markdown_path = target_dir / f"{base_name}{suffix}.md"
-        json_path = target_dir / f"{base_name}{suffix}.json"
-        html_path = target_dir / f"{base_name}{suffix}.html"
-        if not markdown_path.exists() and not json_path.exists() and not html_path.exists():
-            return markdown_path, json_path, html_path
-        suffix = f"_{index}"
-        index += 1
 
 
 def _notification_status(result: dict[str, Any]) -> str:

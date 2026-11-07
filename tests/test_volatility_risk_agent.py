@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import sys
 import unittest
@@ -9,6 +10,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from crypto_market_agents.agents.volatility_risk_agent import VolatilityRiskAgent
 from crypto_market_agents.clients.coingecko_client import CoinGeckoNetworkError
 from crypto_market_agents.schemas import AgentStatus, RiskLevel
+
+
+TEST_NOW = datetime.fromisoformat("2026-07-01T10:05:00+00:00")
+
+
+def make_agent(client, **kwargs):
+    return VolatilityRiskAgent(client, now=lambda: TEST_NOW, **kwargs)
 
 
 class FakeCoinGeckoClient:
@@ -57,7 +65,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
             ]
         )
 
-        report = VolatilityRiskAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.agent_name, "volatility_risk_agent")
         self.assertEqual(report.status, AgentStatus.SUCCESS)
@@ -84,7 +92,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
             ]
         )
 
-        report = VolatilityRiskAgent(client).analyze(["bitcoin"])
+        report = make_agent(client).analyze(["bitcoin"])
 
         self.assertEqual(report.risk_level, RiskLevel.HIGH)
         self.assertTrue(any(finding.title == "Mouvement brutal 1h" for finding in report.findings))
@@ -107,7 +115,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
             ]
         )
 
-        report = VolatilityRiskAgent(client).analyze(["solana"])
+        report = make_agent(client).analyze(["solana"])
 
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
         self.assertTrue(
@@ -132,7 +140,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
             ]
         )
 
-        report = VolatilityRiskAgent(client).analyze(["ethereum"])
+        report = make_agent(client).analyze(["ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
         self.assertTrue(any(finding.title == "Variation extreme 7j" for finding in report.findings))
@@ -146,11 +154,12 @@ class VolatilityRiskAgentTests(unittest.TestCase):
                     "name": "Bitcoin",
                     "current_price": 100000,
                     "price_change_percentage_24h": 2,
+                    "last_updated": TEST_NOW.isoformat(),
                 }
             ]
         )
 
-        report = VolatilityRiskAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.status, AgentStatus.PARTIAL)
         self.assertLess(report.confidence, 0.95)
@@ -166,7 +175,7 @@ class VolatilityRiskAgentTests(unittest.TestCase):
     def test_analyze_returns_failed_when_client_errors(self):
         client = FakeCoinGeckoClient(error=CoinGeckoNetworkError("network down"))
 
-        report = VolatilityRiskAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.status, AgentStatus.FAILED)
         self.assertEqual(report.confidence, 0.0)

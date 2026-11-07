@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from crypto_market_agents.agents.data_quality import (
+    finite_number,
+    is_fresh,
+    parse_timestamp,
+    utc_now,
+)
 from crypto_market_agents.clients.defillama_client import (
     DefiLlamaAPIError,
     DefiLlamaError,
@@ -66,7 +73,9 @@ class OnchainFundamentalAgent:
         client: FundamentalDataClient,
         *,
         thresholds: FundamentalThresholds | None = None,
+        now: Callable[[], datetime] = utc_now,
     ) -> None:
+        self.now = now
         self.client = client
         self.thresholds = thresholds or FundamentalThresholds()
 
@@ -115,6 +124,8 @@ class OnchainFundamentalAgent:
 
         risk_level = self._risk_level(analyses)
         confidence = self._confidence(analyses, requested_count=len(selected_protocols))
+        if errors:
+            confidence = min(confidence, 0.60)
         status = AgentStatus.PARTIAL if errors else AgentStatus.SUCCESS
 
         return AgentReport(
@@ -146,12 +157,24 @@ class OnchainFundamentalAgent:
         current_tvl: float | int | None,
     ) -> dict[str, Any]:
         chains = _string_tuple(protocol.get("chains"))
-        tvl_change_pct = _tvl_change_pct(protocol.get("tvl"))
+        tvl_changes = {
+            "24h": _tvl_change_pct(protocol.get("tvl"), days=1, now=self.now()),
+            "7d": _tvl_change_pct(protocol.get("tvl"), days=7, now=self.now()),
+        }
+        available_changes = {key: value for key, value in tvl_changes.items() if value is not None}
+        worst_window = (
+            min(available_changes, key=available_changes.get) if available_changes else None
+        )
+        tvl_change_pct = available_changes.get(worst_window)
         category = _optional_text(protocol.get("category"))
         fees_slug = _optional_text(protocol.get("slug")) or slug
         tvl = _number(current_tvl)
+        if tvl is not None and tvl < 0:
+            tvl = None
 
         missing_fields = []
+        if not available_changes:
+            missing_fields.append("dated_tvl_history")
         if tvl is None:
             missing_fields.append("current_tvl")
         if category is None:
@@ -166,6 +189,9 @@ class OnchainFundamentalAgent:
             "found": True,
             "current_tvl": tvl,
             "tvl_change_pct": tvl_change_pct,
+            "tvl_change_24h_pct": tvl_changes["24h"],
+            "tvl_change_7d_pct": tvl_changes["7d"],
+            "tvl_change_window": worst_window,
             "category": category,
             "chains": list(chains),
             "missing_fields": missing_fields,
@@ -209,12 +235,15 @@ class OnchainFundamentalAgent:
                 Finding(
                     title="Baisse importante de TVL",
                     description=(
-                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% sur la periode disponible."
+                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% sur {analysis['tvl_change_window']}."
                     ),
                     impact=ImpactDirection.BEARISH,
                     symbols=(slug,),
                     confidence_score=0.76,
-                    data={"tvl_change_pct": tvl_change_pct},
+                    data={
+                        "tvl_change_pct": tvl_change_pct,
+                        "window": analysis["tvl_change_window"],
+                    },
                 )
             )
         elif tvl_change_pct is not None and tvl_change_pct <= self.thresholds.notable_tvl_drop_pct:
@@ -222,12 +251,15 @@ class OnchainFundamentalAgent:
                 Finding(
                     title="Baisse notable de TVL",
                     description=(
-                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% sur la periode disponible."
+                        f"{name} recule de {_fmt(abs(tvl_change_pct))}% sur {analysis['tvl_change_window']}."
                     ),
                     impact=ImpactDirection.BEARISH,
                     symbols=(slug,),
                     confidence_score=0.66,
-                    data={"tvl_change_pct": tvl_change_pct},
+                    data={
+                        "tvl_change_pct": tvl_change_pct,
+                        "window": analysis["tvl_change_window"],
+                    },
                 )
             )
 
@@ -351,7 +383,7 @@ class OnchainFundamentalAgent:
         )
         missing_count = sum(bool(analysis.get("missing_fields")) for analysis in found)
 
-        if strong_drop_count >= 2 or missing_count == len(found):
+        if strong_drop_count >= 2 or all(item.get("current_tvl") is None for item in found):
             return RiskLevel.CRITICAL
         if low_tvl_count or strong_drop_count or not_found_count:
             return RiskLevel.HIGH
@@ -369,13 +401,14 @@ class OnchainFundamentalAgent:
         if not found:
             return 0.10
 
-        required_fields = ("current_tvl", "category", "chains")
+        required_fields = ("current_tvl", "category", "chains", "dated_tvl_history")
         present_total = 0
         expected_total = len(found) * len(required_fields)
         for analysis in found:
             present_total += 1 if analysis.get("current_tvl") is not None else 0
             present_total += 1 if analysis.get("category") else 0
             present_total += 1 if analysis.get("chains") else 0
+            present_total += 1 if analysis.get("tvl_change_pct") is not None else 0
 
         completeness = present_total / expected_total if expected_total else 0
         confidence = 0.15 + (0.55 * coverage) + (0.25 * completeness)
@@ -473,22 +506,38 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip() for item in value if str(item).strip())
 
 
-def _tvl_change_pct(tvl_history: Any) -> float | None:
-    if not isinstance(tvl_history, Sequence) or len(tvl_history) < 2:
+def _tvl_change_pct(tvl_history: Any, *, days: int, now: datetime) -> float | None:
+    """Compare dated daily observations over a bounded window, never lifetime TVL."""
+    if not isinstance(tvl_history, list):
         return None
-
-    first = _history_tvl_value(tvl_history[0])
-    last = _history_tvl_value(tvl_history[-1])
-    if first is None or last is None or first <= 0:
+    points: dict[datetime, float] = {}
+    for item in tvl_history:
+        if not isinstance(item, dict):
+            continue
+        timestamp = parse_timestamp(item.get("date"))
+        value = _history_tvl_value(item)
+        if timestamp is not None and value is not None and value >= 0:
+            points[timestamp] = value
+    if not points:
         return None
-
-    return ((last - first) / first) * 100
+    end = max(points)
+    # DefiLlama histories are daily, so the latest observation can be yesterday.
+    if not is_fresh(end, now, timedelta(days=2)):
+        return None
+    target = end - timedelta(days=days)
+    candidates = [date for date in points if target - timedelta(hours=6) <= date <= target]
+    if not candidates:
+        return None
+    baseline = points[max(candidates)]
+    if baseline <= 0:
+        return None
+    return finite_number((points[end] / baseline - 1) * 100)
 
 
 def _history_tvl_value(item: Any) -> float | None:
     if isinstance(item, dict):
-        return _number(item.get("totalLiquidityUSD") or item.get("tvl"))
-
+        value = item.get("totalLiquidityUSD")
+        return _number(item.get("tvl") if value is None else value)
     return _number(item)
 
 
@@ -554,15 +603,7 @@ def _optional_text(value: Any) -> str | None:
 
 
 def _number(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        return float(value)
-
-    try:
-        return float(str(value).strip())
-    except ValueError:
-        return None
+    return finite_number(value)
 
 
 def _usd(value: float) -> str:
@@ -570,7 +611,6 @@ def _usd(value: float) -> str:
         return f"${value / 1_000_000_000:.2f}B"
     if value >= 1_000_000:
         return f"${value / 1_000_000:.2f}M"
-
     return f"${value:,.0f}"
 
 

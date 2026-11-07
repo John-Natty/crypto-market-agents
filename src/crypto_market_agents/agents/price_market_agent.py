@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from crypto_market_agents.agents.data_quality import (
+    finite_number,
+    utc_now,
+    validate_market_data,
+)
 from crypto_market_agents.clients.coingecko_client import CoinGeckoError
 from crypto_market_agents.schemas import (
     AgentFinding,
@@ -74,7 +80,11 @@ class PriceMarketAgent:
         client: MarketDataClient,
         *,
         thresholds: PriceMarketThresholds | None = None,
+        now: Callable[[], datetime] = utc_now,
+        max_data_age: timedelta = timedelta(minutes=15),
     ) -> None:
+        self.now = now
+        self.max_data_age = max_data_age
         self.client = client
         self.thresholds = thresholds or PriceMarketThresholds()
 
@@ -100,6 +110,16 @@ class PriceMarketAgent:
         if not market_data:
             return self._failed_report("CoinGecko returned no market data.", source)
 
+        market_data, quality_errors = validate_market_data(
+            market_data,
+            clean_coin_ids,
+            self.important_fields,
+            now=self.now(),
+            max_age=self.max_data_age,
+        )
+        if not market_data:
+            return self._failed_report("No usable market data. " + " ".join(quality_errors), source)
+
         analyzed_assets = [_clean_asset(asset) for asset in market_data]
         returned_ids = {
             str(asset.get("id", "")).strip().lower() for asset in market_data if asset.get("id")
@@ -120,7 +140,11 @@ class PriceMarketAgent:
             requested_count=len(clean_coin_ids),
             missing_fields=missing_fields,
         )
-        errors = _build_partial_errors(missing_coin_ids, missing_fields)
+        errors = quality_errors + _build_partial_errors(missing_coin_ids, missing_fields)
+        if errors:
+            confidence = min(confidence, 0.60)
+            if risk_level is RiskLevel.LOW:
+                risk_level = RiskLevel.MEDIUM
         status = AgentStatus.PARTIAL if errors else AgentStatus.SUCCESS
 
         return AgentReport(
@@ -483,15 +507,7 @@ def _symbol(asset: dict[str, Any]) -> str:
 
 
 def _number(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        return float(value)
-
-    try:
-        return float(str(value).strip())
-    except ValueError:
-        return None
+    return finite_number(value)
 
 
 def _fmt(value: float) -> str:

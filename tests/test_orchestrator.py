@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import sys
@@ -22,6 +22,9 @@ from crypto_market_agents.schemas import (
     ImpactDirection,
     RiskLevel,
 )
+
+
+TEST_NOW = datetime.fromisoformat("2026-07-01T12:05:00+00:00")
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -65,10 +68,12 @@ class OrchestratorTests(unittest.TestCase):
         fundamental_client = FakeFundamentalClient()
         orchestrator = CryptoMarketOrchestrator(
             config=self.make_config(),
-            price_market_agent=PriceMarketAgent(market_client),
-            volatility_risk_agent=VolatilityRiskAgent(market_client),
-            news_sentiment_agent=NewsSentimentAgent(news_client),
-            onchain_fundamental_agent=OnchainFundamentalAgent(fundamental_client),
+            price_market_agent=PriceMarketAgent(market_client, now=lambda: TEST_NOW),
+            volatility_risk_agent=VolatilityRiskAgent(market_client, now=lambda: TEST_NOW),
+            news_sentiment_agent=NewsSentimentAgent(news_client, now=lambda: TEST_NOW),
+            onchain_fundamental_agent=OnchainFundamentalAgent(
+                fundamental_client, now=lambda: TEST_NOW
+            ),
             now_provider=lambda: datetime(2026, 7, 1, 12, 34),
         )
 
@@ -329,8 +334,11 @@ class FakeFundamentalClient:
             "category": "Dexes",
             "chains": ["Ethereum", "Arbitrum", "Optimism"],
             "tvl": [
-                {"date": 1, "totalLiquidityUSD": 1_000_000_000},
-                {"date": 2, "totalLiquidityUSD": 1_200_000_000},
+                {
+                    "date": (TEST_NOW - timedelta(days=1)).timestamp(),
+                    "totalLiquidityUSD": 1_000_000_000,
+                },
+                {"date": TEST_NOW.timestamp(), "totalLiquidityUSD": 1_200_000_000},
             ],
         }
 

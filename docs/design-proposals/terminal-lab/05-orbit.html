@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ORBIT — Market Agents</title>
+  <style>
+    :root {
+      --bg: #080d16; --panel: #0c121e; --raised: #111827; --border: #222b3d;
+      --text: #d5dce8; --muted: #7f8b9e; --dim: #535f75; --accent: #a2a9ed;
+      --green: #6dbbaa; --red: #d0808c;
+      --chart-up: #6dbbaa; --chart-down: #cf7e8b; --chart-accent: #a2a9ed;
+      --chart-grid: #1b2333; --chart-text: #748199;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--text); background: var(--bg); font: 12px/1.5 "Inter", "Segoe UI", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+    button, textarea { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    svg { display: block; max-width: 100%; }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-variant-numeric: tabular-nums; }
+    .positive { color: var(--green); }
+    .muted { color: var(--muted); }
+    .proposal-bar { display: flex; justify-content: space-between; gap: 15px; align-items: center; min-height: 29px; padding: 6px 18px; background: #141a2a; border-bottom: 1px solid #292f44; color: #8e97b3; font-size: 9px; letter-spacing: 1px; }
+    .proposal-bar nav { display: flex; gap: 25px; font-size: 10px; letter-spacing: 0; }
+    .proposal-bar a:hover { color: #d4d9fa; }
+    .topbar { height: 56px; padding: 0 19px; display: flex; align-items: center; gap: 27px; border-bottom: 1px solid var(--border); background: #0b111d; }
+    .brand { display: flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 600; letter-spacing: -.6px; white-space: nowrap; }
+    .brand svg { width: 23px; height: 25px; color: var(--accent); }
+    .workspace-label { padding-left: 23px; border-left: 1px solid var(--border); font-size: 10px; letter-spacing: 1.7px; color: #95a0b8; }
+    .topnav { display: flex; align-items: center; gap: 22px; height: 100%; margin-left: 10px; font-size: 11px; color: var(--muted); }
+    .topnav a { display: flex; align-items: center; height: 100%; position: relative; }
+    .topnav a.current { color: #dce1f6; }
+    .topnav a.current::after { content: ""; height: 2px; position: absolute; bottom: -1px; left: 0; right: 0; background: #8f99dd; }
+    .top-status { display: flex; align-items: center; gap: 18px; margin-left: auto; font-size: 10px; white-space: nowrap; }
+    .status-dot { width: 5px; height: 5px; display: inline-block; background: var(--green); border-radius: 50%; margin-right: 6px; vertical-align: 2px; }
+    .paper-tag { color: #b2b8db; background: #1b2339; padding: 4px 7px; font-size: 9px; border: 1px solid #2c3550; border-radius: 3px; }
+    .ticker { display: flex; align-items: center; min-height: 35px; overflow-x: auto; border-bottom: 1px solid var(--border); background: #090f1a; padding-left: 63px; scrollbar-width: thin; }
+    .ticker-item { flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding: 8px 23px 8px 0; margin-right: 23px; border-right: 1px solid #1c2535; font-size: 10px; }
+    .ticker-item .ticker-symbol { color: #8d98ac; font-size: 9px; letter-spacing: .5px; }
+    .ticker-item strong { font-weight: 500; color: #c7d1e2; }
+    .ticker-note { color: #55617a; font-size: 9px; white-space: nowrap; margin-left: auto; padding: 0 18px; }
+    .app { display: grid; grid-template-columns: 45px minmax(0,1fr); }
+    .rail { padding-top: 15px; display: flex; flex-direction: column; align-items: center; gap: 17px; border-right: 1px solid var(--border); background: #0b111c; }
+    .rail a { display: grid; place-items: center; width: 29px; height: 29px; color: #65728c; border-radius: 3px; }
+    .rail a.selected { color: #a7b0ec; background: #1d2540; }
+    .rail a:hover { color: #c9d1ee; }
+    .rail svg { width: 17px; height: 17px; stroke: currentColor; stroke-width: 1.4; fill: none; }
+    .rail-bottom { margin-top: auto; margin-bottom: 15px; font-size: 9px; color: #526078; writing-mode: vertical-rl; letter-spacing: 3px; }
+    .terminal-grid { display: grid; grid-template-columns: 200px minmax(0,1fr) 360px; align-items: stretch; min-width: 0; }
+    .context { background: #0b111d; border-right: 1px solid var(--border); min-width: 0; }
+    .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 39px; padding: 11px 13px; border-bottom: 1px solid var(--border); font-size: 10px; color: #97a2b7; letter-spacing: .65px; font-weight: 500; }
+    .panel-title h2 { font: inherit; margin: 0; }
+    .panel-title small { font-size: 9px; color: #58657e; letter-spacing: 0; }
+    .watch-head { display: flex; justify-content: space-between; padding: 11px 13px 5px; color: #55627b; text-transform: uppercase; font-size: 8px; letter-spacing: .8px; }
+    .watch-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 12px; border-left: 2px solid transparent; border-bottom: 1px solid #151e2e; gap: 8px; }
+    .watch-row.selected { border-left-color: #8895d8; background: #141d30; }
+    .watch-name { display: flex; align-items: center; gap: 8px; }
+    .coin { width: 21px; height: 21px; display: grid; place-items: center; font-size: 12px; font-weight: 500; background: #25231f; color: #b7a171; border: 1px solid #393126; border-radius: 50%; }
+    .coin.eth { color: #9aa5c9; background: #202538; border-color: #2e3751; }
+    .coin.sol { color: #a399c4; background: #252035; border-color: #352d49; }
+    .watch-name strong { font-size: 12px; font-weight: 550; display: block; }
+    .watch-name small { display: block; font-size: 8px; color: #697790; }
+    .watch-price { font-size: 11px; text-align: right; white-space: nowrap; }
+    .watch-price small { display: block; font-size: 8px; color: #60728c; margin-top: 3px; }
+    .context-block { border-top: 1px solid var(--border); margin-top: 18px; }
+    .news-note { padding: 10px 13px 0; font-size: 9px; color: #626e87; }
+    .news { padding: 13px; border-bottom: 1px solid #1b2332; }
+    .news-meta { color: #57657e; display: flex; justify-content: space-between; font-size: 8px; margin-bottom: 6px; letter-spacing: .3px; }
+    .news p { margin: 0; color: #919db3; font-size: 12px; line-height: 1.6; }
+    .news small { display: block; margin-top: 8px; font-size: 8px; color: #737fab; }
+    .rules-body { padding: 8px 13px 14px; }
+    .rule { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid #1b2435; }
+    .rule span { font-size: 11px; color: #7a87a0; }
+    .rule strong { font-size: 11px; font-weight: 500; white-space: nowrap; }
+    .rules-foot { margin: 13px 0 0; color: #5b6a85; font-size: 9px; line-height: 1.6; }
+    .market { background: var(--panel); min-width: 0; }
+    .balances { min-height: 77px; display: grid; grid-template-columns: 1.3fr 1fr 1fr .8fr; border-bottom: 1px solid var(--border); }
+    .balance { padding: 15px 17px 12px; border-right: 1px solid #1d2637; }
+    .balance:last-child { border-right: 0; }
+    .balance span { display: block; font-size: 9px; color: #748299; margin-bottom: 5px; }
+    .balance strong { display: block; font-weight: 500; font-size: 18px; line-height: 1.2; letter-spacing: -.5px; white-space: nowrap; }
+    .balance.main strong { color: #e3e8f3; font-size: 22px; }
+    .balance small { display: block; font-size: 9px; margin-top: 4px; color: #65748e; white-space: nowrap; }
+    .balance .positive { color: var(--green); }
+    .instrument { padding: 17px 17px 13px; display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+    .instrument-name { display: flex; align-items: center; gap: 10px; }
+    .instrument .coin { width: 28px; height: 28px; font-size: 16px; }
+    .instrument h1 { margin: 0; font-size: 19px; font-weight: 550; letter-spacing: -.45px; line-height: 1.25; }
+    .instrument p { font-size: 9px; color: #61708a; margin: 3px 0 0; }
+    .instrument-price { text-align: right; }
+    .instrument-price strong { font-size: 21px; font-weight: 500; letter-spacing: -.7px; }
+    .instrument-price small { display: block; font-size: 9px; color: #7381a0; }
+    .chart-toolbar { height: 35px; display: flex; align-items: center; justify-content: space-between; border-block: 1px solid #1d2637; padding: 0 12px; gap: 12px; background: #0a101b; }
+    .timeframes { display: flex; gap: 4px; align-items: center; }
+    .timeframes button { padding: 3px 8px; border: 0; background: transparent; color: #667690; border-radius: 3px; font-size: 10px; }
+    .timeframes button[aria-pressed="true"] { background: #212941; color: #b3baf2; }
+    .chart-kind { font-size: 9px; color: #75829b; padding-left: 11px; margin-left: 4px; border-left: 1px solid #263045; }
+    .chart-tools { display: flex; gap: 12px; color: #64718b; font-size: 9px; }
+    .chart-tools svg { width: 12px; height: 12px; }
+    .chart-container { position: relative; }
+    [data-chart] { width: 100%; min-width: 0; color: #68758f; background: #0c121e; }
+    [data-chart] svg { width: 100%; height: 100%; }
+    .chart-placeholder { padding: 25px 16px; font-size: 11px; color: #67738b; }
+    .chart-disclaimer { display: flex; justify-content: space-between; gap: 10px; padding: 5px 13px 8px; color: #4f5e76; font-size: 8px; border-bottom: 1px solid var(--border); }
+    .table-tabs { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 15px; border-bottom: 1px solid var(--border); }
+    .tab-set { display: flex; align-items: center; gap: 18px; color: #61708b; font-size: 10px; }
+    .tab-set .current { color: #b0b9dc; }
+    .tab-count { font-size: 8px; color: #828eb3; background: #1c2439; padding: 1px 4px; margin-left: 4px; border-radius: 2px; }
+    .table-tabs .note { color: #57647c; font-size: 8px; }
+    .table-wrap { overflow-x: auto; scrollbar-width: thin; }
+    table { border-collapse: collapse; width: 100%; white-space: nowrap; font-size: 12px; }
+    th { font-size: 9px; color: #5f6d85; font-weight: 400; text-align: left; padding: 10px 15px 8px; }
+    td { padding: 11px 15px; border-top: 1px solid #1c2535; color: #a1afc5; }
+    th:last-child, td:last-child { text-align: right; }
+    .position-asset { display: flex; gap: 7px; align-items: center; }
+    .position-asset .coin { width: 17px; height: 17px; font-size: 10px; }
+    .exposure-track { width: 60px; height: 3px; background: #273047; border-radius: 1px; margin-top: 5px; margin-left: auto; }
+    .exposure-track span { width: 39.1%; height: 100%; background: #8996d5; display: block; }
+    .journal-title { border-top: 1px solid var(--border); margin-top: 10px; }
+    .journal-table td { padding-block: 9px; }
+    .decision-tag { font-size: 8px; text-transform: uppercase; letter-spacing: .6px; color: #929dbe; }
+    .decision-tag.buy { color: var(--green); }
+    .agent { background: #0e1321; border-left: 1px solid #2b314a; display: flex; flex-direction: column; min-width: 0; }
+    .agent-header { min-height: 51px; padding: 13px 17px; border-bottom: 1px solid #262e44; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .agent-brand { display: flex; align-items: center; gap: 9px; }
+    .agent-brand svg { width: 25px; height: 25px; color: #8d99df; }
+    .agent-brand strong { font-size: 11px; letter-spacing: 1.2px; font-weight: 550; }
+    .agent-brand small { display: block; font-size: 8px; color: #77819f; letter-spacing: .3px; }
+    .agent-header .tag { font-size: 8px; color: #8a95b9; background: #1c2236; border: 1px solid #2b334c; padding: 2px 5px; border-radius: 3px; }
+    .agent-context { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 9px 16px; background: #141a2c; border-bottom: 1px solid #252d43; color: #858fab; font-size: 9px; }
+    .agent-context span:last-child { color: #5f6b8c; font-size: 8px; }
+    [data-chat-log] { padding: 21px 17px 10px; flex: 1; font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
+    .message-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: #62708e; font-size: 8px; letter-spacing: .8px; }
+    .message-meta span:first-child { color: #a7b0e0; }
+    .message-meta time { margin-left: auto; letter-spacing: 0; }
+    .analysis-message { color: #a7b1c8; }
+    .analysis-message p { margin: 0 0 15px; }
+    .analysis-message .lead { font-size: 13px; color: #ccd3e5; line-height: 1.65; }
+    .analysis-message .hold { background: #1b2136; border: 1px solid #303853; border-left: 2px solid #919cdc; padding: 11px 12px; border-radius: 3px; margin: 16px 0; }
+    .hold .mini-label { display: flex; align-items: center; justify-content: space-between; font-size: 8px; color: #818caf; letter-spacing: .7px; }
+    .hold .mini-label strong { color: #b3bde8; font-size: 9px; font-weight: 500; }
+    .hold p { margin: 9px 0 0; color: #bec6dd; font-size: 12px; line-height: 1.7; }
+    .analysis-heading { color: #8995b8; font-size: 9px; font-weight: 500; letter-spacing: .7px; margin: 19px 0 9px; }
+    .analysis-facts { margin: 0; padding: 0; list-style: none; }
+    .analysis-facts li { display: flex; align-items: baseline; gap: 9px; margin-bottom: 9px; font-size: 11px; line-height: 1.7; }
+    .analysis-facts .bullet { color: #656f9e; font-size: 8px; }
+    .analysis-facts strong { font-weight: 500; color: #c9d2e5; }
+    .context-stamp { display: flex; align-items: center; gap: 6px; margin: 19px 0 5px; color: #586882; font-size: 8px; }
+    .context-stamp svg { width: 11px; height: 11px; }
+    .chat-message, [data-chat-log] > .message { margin: 16px 0; padding: 11px 12px; border: 1px solid #28324a; border-radius: 4px; font-size: 12px; background: #131b2c; }
+    .chat-message.user, .message.user { margin-left: 25px; border-color: #353d60; color: #c1c8ee; background: #1e2642; }
+    .suggestions { padding: 5px 17px 20px; }
+    .suggestions-label { color: #5a6683; font-size: 8px; letter-spacing: 1px; margin-bottom: 9px; }
+    .suggestions button { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 1px solid #283149; background: #121a2c; border-radius: 3px; color: #99a5c5; padding: 9px 10px; font-size: 10px; margin: 6px 0 0; }
+    .suggestions button:hover { background: #1a2440; border-color: #4b557d; }
+    .suggestions button span { color: #596992; }
+    .composer { padding: 15px 16px 13px; border-top: 1px solid #283148; background: #0d1321; margin-top: auto; }
+    .composer-box { border: 1px solid #384265; border-radius: 4px; background: #151d30; padding: 10px; }
+    .composer label { display: block; color: #8e9ab8; font-size: 9px; margin-bottom: 6px; }
+    .composer textarea { display: block; resize: vertical; width: 100%; min-height: 54px; max-height: 150px; color: #d2d9ee; background: transparent; border: 0; padding: 0; font-size: 11px; line-height: 1.6; }
+    .composer textarea::placeholder { color: #586784; }
+    .composer-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; }
+    .composer-actions small { color: #5e6d8e; font-size: 8px; }
+    .composer button[type="submit"] { display: flex; align-items: center; gap: 7px; background: #6b75b7; border: 1px solid #7d87c9; color: #f0f1ff; border-radius: 3px; padding: 6px 9px; font-size: 10px; }
+    .composer button[type="submit"]:hover { background: #7b85c8; }
+    .composer button svg { width: 12px; height: 12px; }
+    .composer-foot { display: flex; justify-content: space-between; gap: 8px; padding-top: 9px; font-size: 8px; color: #55637f; }
+    .statusbar { min-height: 27px; display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 6px 15px; background: #0a101b; border-top: 1px solid var(--border); color: #586681; font-size: 8px; }
+    .statusbar-left { display: flex; gap: 22px; align-items: center; }
+    .statusbar strong { font-weight: 400; color: #8a95af; }
+    @media (min-width: 1450px) { .terminal-grid { grid-template-columns: 200px minmax(0,1fr) 380px; } .agent { min-height: 867px; } }
+    @media (max-width: 1180px) {
+      .terminal-grid { grid-template-columns: 170px minmax(0,1fr) 320px; }
+      .balance { padding-inline: 11px; }
+      .balance strong { font-size: 16px; }
+      .balance.main strong { font-size: 20px; }
+      .topbar { gap: 19px; }
+      .topnav { gap: 18px; }
+      .workspace-label { padding-left: 19px; }
+      .context .panel-title { font-size: 9px; }
+      .watch-name { gap: 5px; }
+      .watch-row { padding-inline: 8px; }
+      .watch-price { font-size: 9px; }
+      .watch-name small { font-size: 7px; }
+      .chart-tools { gap: 7px; }
+      .ticker { padding-left: 60px; }
+    }
+    @media (max-width: 990px) {
+      .terminal-grid { grid-template-columns: minmax(0,1fr) 320px; }
+      .context { grid-column: 1 / -1; order: 3; border-right: 0; border-top: 1px solid var(--border); display: grid; grid-template-columns: .85fr 1.3fr 1fr; }
+      .context-block { margin-top: 0; border-top: 0; border-left: 1px solid var(--border); }
+      .context .news:nth-of-type(3) { display: none; }
+      .top-status .muted { display: none; }
+      .topbar { gap: 15px; }
+      .topnav { margin-left: 0; gap: 16px; }
+      .workspace-label { display: none; }
+      .ticker-note { display: none; }
+      .chart-tools { display: none; }
+      .balances { grid-template-columns: 1.2fr 1fr 1fr; }
+      .balance:last-child { display: none; }
+      .analysis-message .lead { font-size: 12px; }
+    }
+    @media (max-width: 720px) {
+      .proposal-bar { padding: 8px 12px; font-size: 8px; align-items: flex-start; flex-direction: column; gap: 4px; }
+      .proposal-bar nav { font-size: 9px; gap: 18px; }
+      .topbar { height: auto; min-height: 53px; padding: 12px; flex-wrap: wrap; gap: 14px; }
+      .brand { font-size: 15px; }
+      .topnav { order: 3; width: 100%; height: 25px; gap: 22px; font-size: 10px; }
+      .topnav a.current::after { bottom: -12px; }
+      .top-status { font-size: 9px; gap: 8px; }
+      .ticker { padding-left: 12px; min-height: 36px; }
+      .ticker-item { margin-right: 14px; padding-right: 14px; gap: 8px; font-size: 9px; }
+      .ticker-item .ticker-symbol { font-size: 8px; }
+      .app { grid-template-columns: 34px minmax(0,1fr); }
+      .rail { padding-top: 12px; gap: 18px; }
+      .rail a { width: 25px; height: 26px; }
+      .rail svg { width: 14px; height: 14px; }
+      .terminal-grid { display: flex; flex-direction: column; }
+      .market { order: 1; }
+      .agent { order: 2; border-left: 0; border-block: 1px solid #343d5e; margin-top: 0; }
+      .context { order: 3; display: grid; grid-template-columns: 1fr; }
+      .context-block { border-left: 0; border-top: 1px solid var(--border); }
+      .context .news:nth-of-type(3) { display: block; }
+      .balances { min-height: 81px; }
+      .balance { padding: 12px 10px; }
+      .balance span { font-size: 8px; }
+      .balance strong { font-size: 17px; }
+      .balance.main strong { font-size: 20px; }
+      .balance small { font-size: 8px; }
+      .instrument { padding: 14px 11px; }
+      .instrument-name { gap: 7px; }
+      .instrument h1 { font-size: 17px; }
+      .instrument .coin { width: 24px; height: 24px; font-size: 14px; }
+      .instrument-price strong { font-size: 18px; }
+      .instrument-price small { font-size: 8px; }
+      .instrument p { font-size: 8px; }
+      .chart-toolbar { padding-inline: 7px; }
+      .chart-kind { font-size: 8px; padding-left: 7px; }
+      [data-chart] { height: 310px !important; }
+      .chart-disclaimer { font-size: 7px; padding-inline: 9px; }
+      .table-tabs { padding-inline: 11px; }
+      .tab-set { gap: 11px; font-size: 9px; }
+      .table-tabs .note { font-size: 7px; }
+      .journal-table { min-width: 400px; }
+      .agent-header { padding: 14px; }
+      .agent-context { padding-inline: 14px; font-size: 8px; }
+      [data-chat-log] { padding: 20px 14px 12px; }
+      .analysis-message .lead { font-size: 13px; }
+      .analysis-facts li { font-size: 12px; }
+      .suggestions { padding-inline: 14px; }
+      .composer { padding-inline: 14px; }
+      .composer textarea { min-height: 62px; }
+      .watch-row { padding: 12px 15px; }
+      .watch-price { font-size: 12px; }
+      .watch-name strong { font-size: 12px; }
+      .watch-name small { font-size: 9px; }
+      .news p { font-size: 12px; }
+      .statusbar { align-items: flex-start; flex-direction: column; gap: 4px; padding-left: 46px; }
+      .statusbar-left { gap: 11px; flex-wrap: wrap; }
+    }
+    @media (max-width: 350px) {
+      .app { grid-template-columns: 29px minmax(0,1fr); }
+      .brand { gap: 7px; font-size: 14px; }
+      .brand svg { width: 21px; }
+      .topbar { gap: 10px; padding-inline: 10px; }
+      .paper-tag { font-size: 8px; padding: 3px 5px; }
+      .balance { padding-inline: 8px; }
+      .balance strong { font-size: 15px; }
+      .balance.main strong { font-size: 18px; }
+      .balance small { font-size: 7px; }
+      .instrument { gap: 7px; padding-inline: 9px; }
+      .instrument h1 { font-size: 15px; }
+      .instrument-price strong { font-size: 16px; }
+      .instrument .coin { display: none; }
+      .chart-kind { font-size: 7px; }
+      .chart-disclaimer span:last-child { display: none; }
+      .agent-header { padding-inline: 12px; }
+      .agent-context { padding-inline: 12px; }
+      [data-chat-log] { padding-inline: 12px; }
+      .suggestions, .composer { padding-inline: 12px; }
+      .composer-actions small { font-size: 7px; }
+      .agent-context span:last-child { font-size: 7px; }
+      .table-tabs .note { display: none; }
+      .statusbar { padding-left: 40px; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+  <script src="./shared.js" defer></script>
+</head>
+<body>
+  <div class="proposal-bar"><span>PROPOSITION 05 ORBIT · DONNÉES FICTIVES</span><nav aria-label="Les propositions"><a href="./index.html">← Les 5 terminaux</a><a href="./01-nexus.html">Suivante : Nexus ↗</a></nav></div>
+  <header class="topbar">
+    <a class="brand" href="#market"><svg viewBox="0 0 24 26" fill="none" aria-hidden="true"><path d="M2 22V7l6 8 6-13 8 7v13" stroke="currentColor" stroke-width="2"/><path d="m2 22 6-7 6 7 8-13" stroke="currentColor" stroke-opacity=".35" stroke-width="1.5"/></svg>Market Agents</a>
+    <div class="workspace-label">ORBIT / TERMINAL</div>
+    <nav class="topnav" aria-label="Navigation principale"><a class="current" href="#market">Marché</a><a href="#positions">Portefeuille</a><a href="#journal">Journal</a></nav>
+    <div class="top-status"><span class="muted"><span class="status-dot"></span>Observation simulée</span><span class="paper-tag">PAPER MODE</span></div>
+  </header>
+  <div class="ticker" aria-label="Cours fictifs">
+    <div class="ticker-item"><span class="ticker-symbol">BTC / EUR</span><strong class="mono">80 000,00</strong><span class="muted">€</span></div>
+    <div class="ticker-item"><span class="ticker-symbol">ETH / EUR</span><strong class="mono">2 940,00</strong><span class="muted">€</span></div>
+    <div class="ticker-item"><span class="ticker-symbol">SOL / EUR</span><strong class="mono">141,62</strong><span class="muted">€</span></div>
+    <div class="ticker-note">Marché de démonstration · Aucun flux réel</div>
+  </div>
+  <div class="app">
+    <nav class="rail" aria-label="Accès rapide">
+      <a href="#market" class="selected" aria-label="Graphique du marché" title="Marché"><svg viewBox="0 0 20 20"><path d="M4 3v13M2 7h4v5H2ZM10 1v16M8 4h4v7H8ZM16 5v14M14 10h4v5h-4Z"/></svg></a>
+      <a href="#positions" aria-label="Positions" title="Positions"><svg viewBox="0 0 20 20"><rect x="2" y="4" width="16" height="13" rx="2"/><path d="M2 8h16M6 4V2h8v2M12 11h6v3h-6z"/></svg></a>
+      <a href="#agent" aria-label="Conversation avec l’agent" title="Agent IA"><svg viewBox="0 0 20 20"><path d="M4 3h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8l-4 3v-3a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M6 7h8M6 11h5"/></svg></a>
+      <a href="#journal" aria-label="Journal des décisions" title="Journal"><svg viewBox="0 0 20 20"><path d="M5 2h11v16H5zM2 6h5M2 10h5M2 14h5M9 6h4M9 10h4"/></svg></a>
+      <a href="#rules" aria-label="Règles de simulation" title="Règles"><svg viewBox="0 0 20 20"><path d="m10 2 7 3v5c0 4-7 8-7 8s-7-4-7-8V5l7-3Z"/><path d="m6.5 10 2.3 2.3 4.7-5"/></svg></a>
+      <span class="rail-bottom">ORBIT 05</span>
+    </nav>
+    <main class="terminal-grid">
+      <aside class="context" aria-label="Marchés, brèves et règles">
+        <section aria-labelledby="watch-title">
+          <div class="panel-title"><h2 id="watch-title">LISTE DE SUIVI</h2><small>3 actifs</small></div>
+          <div class="watch-head"><span>Symbole</span><span>Dernier / EUR</span></div>
+          <a class="watch-row selected" href="#market"><span class="watch-name"><span class="coin">₿</span><span><strong>BTC</strong><small>Bitcoin</small></span></span><span class="watch-price mono">80 000,00<small>Actif observé</small></span></a>
+          <div class="watch-row"><span class="watch-name"><span class="coin eth">◇</span><span><strong>ETH</strong><small>Ethereum</small></span></span><span class="watch-price mono">2 940,00<small>Cours fictif</small></span></div>
+          <div class="watch-row"><span class="watch-name"><span class="coin sol">≋</span><span><strong>SOL</strong><small>Solana</small></span></span><span class="watch-price mono">141,62<small>Cours fictif</small></span></div>
+        </section>
+        <section class="context-block" aria-labelledby="news-title">
+          <div class="panel-title"><h2 id="news-title">BRÈVES DE MARCHÉ</h2><small>DEMO</small></div>
+          <div class="news-note">Textes inventés, uniquement illustratifs.</div>
+          <article class="news"><div class="news-meta"><span>OBSERVATION</span><time>14:02</time></div><p>Bitcoin évolue dans une zone étroite sur cette séance fictive.</p><small>Marché · Illustration</small></article>
+          <article class="news"><div class="news-meta"><span>VOLUMES</span><time>13:48</time></div><p>Le volume de démonstration se concentre sur quelques séquences.</p><small>Activité · Illustration</small></article>
+          <article class="news"><div class="news-meta"><span>SIMULATION</span><time>13:30</time></div><p>Les frais restent intégrés à chaque décision du portefeuille fictif.</p><small>Portefeuille · Illustration</small></article>
+        </section>
+        <section class="context-block" id="rules" aria-labelledby="rules-title">
+          <div class="panel-title"><h2 id="rules-title">LIMITES DU PORTEFEUILLE</h2></div>
+          <div class="rules-body"><div class="rule"><span>Par ordre</span><strong class="mono">10 €</strong></div><div class="rule"><span>Par position</span><strong class="mono">25 €</strong></div><div class="rule"><span>Perte / blocage achats</span><strong class="mono">5 €</strong></div><p class="rules-foot">Seuils fictifs appliqués à la simulation. Aucun ordre réel.</p></div>
+        </section>
+      </aside>
+      <section class="market" id="market" data-market-panel aria-label="Marché Bitcoin et portefeuille simulé">
+        <div class="balances">
+          <div class="balance main"><span>CAPITAL SIMULÉ</span><strong class="mono">51,20 €</strong><small>Initial : 50,00 €</small></div>
+          <div class="balance"><span>RÉSULTAT NET</span><strong class="mono positive">+1,20 €</strong><small class="positive">+2,4 %</small></div>
+          <div class="balance"><span>DISPONIBLE</span><strong class="mono">31,20 €</strong><small>Liquidités EUR</small></div>
+          <div class="balance"><span>FRAIS</span><strong class="mono">0,08 €</strong><small>Cumulés</small></div>
+        </div>
+        <div class="instrument"><div class="instrument-name"><span class="coin">₿</span><div><h1>BTC / EUR</h1><p>Bitcoin · Marché de démonstration</p></div></div><div class="instrument-price"><strong class="mono">80 000,00</strong><small>Dernier cours fictif · EUR</small></div></div>
+        <div class="chart-toolbar"><div class="timeframes" aria-label="Unité de temps du graphique"><button type="button" data-timeframe="5m" aria-pressed="false">5m</button><button type="button" data-timeframe="15m" aria-pressed="true">15m</button><button type="button" data-timeframe="1h" aria-pressed="false">1h</button><span class="chart-kind">Chandeliers · Volume</span></div><div class="chart-tools"><span>BTC / EUR</span><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 6V2h4m4 0h4v4m0 4v4h-4m-4 0H2v-4" stroke="currentColor"/></svg></div></div>
+        <div class="chart-container"><div data-chart="BTC" data-chart-label="BTC / EUR" style="height:400px"><div class="chart-placeholder">Graphique de démonstration · BTC / EUR</div></div></div>
+        <div class="chart-disclaimer"><span>OHLC ET VOLUMES SYNTHÉTIQUES · AUCUNE DONNÉE RÉELLE</span><span class="mono">UTC+2 · EUR</span></div>
+        <section id="positions" aria-labelledby="positions-title">
+          <div class="table-tabs"><div class="tab-set"><span id="positions-title" class="current">Positions <span class="tab-count">1</span></span><span>Allocation</span></div><span class="note">Portefeuille simulé</span></div>
+          <div class="table-wrap"><table><thead><tr><th>ACTIF</th><th>QUANTITÉ</th><th>VALEUR</th><th>EXPOSITION</th></tr></thead><tbody><tr><td><span class="position-asset"><span class="coin">₿</span>Bitcoin</span></td><td class="mono">0,00025 BTC</td><td class="mono">20,00 €</td><td class="mono">39,1 %<div class="exposure-track" aria-hidden="true"><span></span></div></td></tr><tr><td>Liquidités</td><td class="mono">31,20 EUR</td><td class="mono">31,20 €</td><td class="mono">60,9 %</td></tr></tbody></table></div>
+        </section>
+        <section id="journal" aria-labelledby="journal-title"><div class="table-tabs journal-title"><div class="tab-set"><span class="current" id="journal-title">Journal des décisions</span></div><span class="note">Aujourd'hui · Données fictives</span></div><div class="table-wrap"><table class="journal-table"><thead><tr><th>HEURE</th><th>ACTION</th><th>OBSERVATION</th><th>MONTANT</th></tr></thead><tbody><tr><td class="mono">14:00:00</td><td><span class="decision-tag">Attendre</span></td><td>Mouvement insuffisant face aux frais</td><td class="mono">—</td></tr><tr><td class="mono">13:55:00</td><td><span class="decision-tag">Attendre</span></td><td>Position maintenue</td><td class="mono">—</td></tr><tr><td class="mono">10:00:00</td><td><span class="decision-tag buy">Acheter</span></td><td>Ordre simulé dans les limites</td><td class="mono">10,00 €</td></tr></tbody></table></div></section>
+      </section>
+      <aside class="agent" id="agent" data-agent-panel aria-label="Conversation avec l’agent IA">
+        <div class="agent-header"><div class="agent-brand"><svg viewBox="0 0 30 30" fill="none" aria-hidden="true"><circle cx="15" cy="15" r="5" fill="currentColor" fill-opacity=".25"/><circle cx="15" cy="15" r="2" fill="currentColor"/><ellipse cx="15" cy="15" rx="13" ry="7" transform="rotate(-35 15 15)" stroke="currentColor" stroke-opacity=".75"/><ellipse cx="15" cy="15" rx="12" ry="6" transform="rotate(55 15 15)" stroke="currentColor" stroke-opacity=".35"/><circle cx="25" cy="7" r="2" fill="currentColor"/></svg><div><strong>ORBIT / AGENT IA</strong><small>Observer. Comprendre. Questionner.</small></div></div><span class="tag">DÉMO</span></div>
+        <div class="agent-context"><span><span class="status-dot"></span>Contexte : portefeuille BTC / EUR</span><span class="mono">14:00 · FICTIF</span></div>
+        <div data-chat-log role="log" aria-live="polite" aria-label="Messages de démonstration">
+          <div class="message-meta"><span>ORBIT</span><span>ANALYSE DU PORTEFEUILLE</span><time class="mono">14:00</time></div>
+          <div class="analysis-message">
+            <p class="lead">Le portefeuille progresse. La dernière décision reste d’attendre.</p>
+            <p>Voici la lecture des dernières observations de cette simulation fictive.</p>
+            <div class="hold"><div class="mini-label"><span>DERNIÈRE ACTION</span><strong>Ⅱ &nbsp; ATTENDRE</strong></div><p>Le mouvement observé ne justifie pas encore les frais.</p></div>
+            <h2 class="analysis-heading">CE QUE DISENT LES CHIFFRES</h2>
+            <ul class="analysis-facts"><li><span class="bullet">01</span><span>Capital : <strong class="mono">51,20 €</strong>, soit <strong class="positive">+1,20 € (+2,4 %)</strong> depuis les 50 € initiaux.</span></li><li><span class="bullet">02</span><span>Bitcoin représente <strong>39,1 %</strong> du portefeuille : <strong class="mono">20 €</strong> pour <strong class="mono">0,00025 BTC</strong>.</span></li><li><span class="bullet">03</span><span><strong class="mono">31,20 €</strong> restent disponibles. Les frais cumulés atteignent <strong class="mono">0,08 €</strong>.</span></li></ul>
+            <h2 class="analysis-heading">LE CADRE RESTE LE MÊME</h2>
+            <p style="font-size:11px">10 € maximum par ordre, 25 € par position. Une perte de 5 € déclenche le blocage des achats dans la simulation.</p>
+            <div class="context-stamp"><svg viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="m7 1 5 2v4c0 3-5 6-5 6S2 10 2 7V3l5-2Z" stroke="currentColor"/><path d="m4.5 6.5 1.7 1.7 3.2-3.4" stroke="currentColor"/></svg>Analyse fictive · Explication uniquement, aucune exécution</div>
+          </div>
+        </div>
+        <div class="suggestions"><div class="suggestions-label">POURSUIVRE L’OBSERVATION</div><button type="button" data-question="Pourquoi la dernière décision est-elle d’attendre ?">Pourquoi attendre maintenant ? <span>↗</span></button><button type="button" data-question="Quelle est mon exposition actuelle au Bitcoin ?">Comprendre mon exposition <span>↗</span></button><button type="button" data-question="Comment les frais influencent-ils cette décision ?">Quel est l’impact des frais ? <span>↗</span></button></div>
+        <form class="composer" data-demo-chat><div class="composer-box"><label for="orbit-message">Questionner l’agent</label><textarea id="orbit-message" name="message" rows="2" placeholder="Posez une question sur cette simulation…" maxlength="2000" required></textarea><div class="composer-actions"><small>Conversation de démonstration</small><button type="submit">Envoyer <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m3 8 10-5-3 10-2-4-5-1Z" stroke="currentColor" stroke-linejoin="round"/><path d="m8 9 5-6" stroke="currentColor"/></svg></button></div></div><div class="composer-foot"><span>Réponses fictives · Aucune API</span><span>Pas d’argent réel</span></div></form>
+      </aside>
+    </main>
+  </div>
+  <footer class="statusbar"><div class="statusbar-left"><span><span class="status-dot"></span>ENVIRONNEMENT SIMULÉ</span><span>Prochain cycle <strong class="mono">02:18</strong> · illustratif</span></div><span>Market Agents / ORBIT · Proposition visuelle 05</span></footer>
+</body>
+</html>

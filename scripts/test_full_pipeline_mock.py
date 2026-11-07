@@ -1,5 +1,6 @@
 """Local smoke test for the full mock analysis pipeline."""
 
+from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import sys
@@ -20,16 +21,21 @@ from crypto_market_agents.reporting.report_renderer import (
 )
 
 
+TEST_NOW = datetime.fromisoformat("2026-07-01T12:05:00+00:00")
+
+
 def main() -> None:
     market_client = FakeMarketClient()
     news_client = FakeNewsClient()
     fundamental_client = FakeFundamentalClient()
 
     reports = [
-        PriceMarketAgent(market_client).analyze(["bitcoin", "ethereum"]),
-        VolatilityRiskAgent(market_client).analyze(["bitcoin", "ethereum"]),
-        NewsSentimentAgent(news_client).analyze(["bitcoin", "ethereum"]),
-        OnchainFundamentalAgent(fundamental_client).analyze(["uniswap", "aave"]),
+        PriceMarketAgent(market_client, now=lambda: TEST_NOW).analyze(["bitcoin", "ethereum"]),
+        VolatilityRiskAgent(market_client, now=lambda: TEST_NOW).analyze(["bitcoin", "ethereum"]),
+        NewsSentimentAgent(news_client, now=lambda: TEST_NOW).analyze(["bitcoin", "ethereum"]),
+        OnchainFundamentalAgent(fundamental_client, now=lambda: TEST_NOW).analyze(
+            ["uniswap", "aave"]
+        ),
     ]
     final_report = FinalSynthesisAgent().synthesize(reports)
 
@@ -116,8 +122,11 @@ class FakeFundamentalClient:
             "category": "Dexes",
             "chains": ["Ethereum", "Arbitrum", "Optimism"],
             "tvl": [
-                {"date": 1, "totalLiquidityUSD": 1_000_000_000},
-                {"date": 2, "totalLiquidityUSD": 1_200_000_000},
+                {
+                    "date": (TEST_NOW - timedelta(days=1)).timestamp(),
+                    "totalLiquidityUSD": 1_000_000_000,
+                },
+                {"date": TEST_NOW.timestamp(), "totalLiquidityUSD": 1_200_000_000},
             ],
         }
 
