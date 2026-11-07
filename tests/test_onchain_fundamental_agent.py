@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 import unittest
@@ -14,6 +15,13 @@ from crypto_market_agents.clients.defillama_client import (
     DefiLlamaNetworkError,
 )
 from crypto_market_agents.schemas import AgentStatus, RiskLevel
+
+
+TEST_NOW = datetime.fromisoformat("2026-07-01T10:05:00+00:00")
+
+
+def make_agent(client, **kwargs):
+    return OnchainFundamentalAgent(client, now=lambda: TEST_NOW, **kwargs)
 
 
 class FakeDefiLlamaClient:
@@ -72,7 +80,7 @@ class OnchainFundamentalAgentTests(unittest.TestCase):
             tvls={"uniswap": 1_200_000_000, "aave": 900_000_000},
         )
 
-        report = OnchainFundamentalAgent(client).analyze(["uniswap", "aave"])
+        report = make_agent(client).analyze(["uniswap", "aave"])
 
         self.assertEqual(report.agent_name, "onchain_fundamental_agent")
         self.assertEqual(report.status, AgentStatus.SUCCESS)
@@ -92,7 +100,7 @@ class OnchainFundamentalAgentTests(unittest.TestCase):
             tvls={"small": 20_000_000},
         )
 
-        report = OnchainFundamentalAgent(client).analyze(["small"])
+        report = make_agent(client).analyze(["small"])
 
         self.assertEqual(report.risk_level, RiskLevel.HIGH)
         self.assertTrue(any(finding.title == "TVL faible" for finding in report.findings))
@@ -100,7 +108,7 @@ class OnchainFundamentalAgentTests(unittest.TestCase):
     def test_analyze_protocol_not_found(self):
         client = FakeDefiLlamaClient(protocols={}, tvls={})
 
-        report = OnchainFundamentalAgent(client).analyze(["missing"])
+        report = make_agent(client).analyze(["missing"])
 
         self.assertEqual(report.status, AgentStatus.PARTIAL)
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
@@ -114,7 +122,7 @@ class OnchainFundamentalAgentTests(unittest.TestCase):
             tvls={"partial": None},
         )
 
-        report = OnchainFundamentalAgent(client).analyze(["partial"])
+        report = make_agent(client).analyze(["partial"])
 
         self.assertEqual(report.status, AgentStatus.PARTIAL)
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
@@ -126,7 +134,7 @@ class OnchainFundamentalAgentTests(unittest.TestCase):
     def test_analyze_returns_failed_when_client_errors(self):
         client = FakeDefiLlamaClient(error=DefiLlamaNetworkError("network down"))
 
-        report = OnchainFundamentalAgent(client).analyze(["aave"])
+        report = make_agent(client).analyze(["aave"])
 
         self.assertEqual(report.status, AgentStatus.FAILED)
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
@@ -141,8 +149,11 @@ def protocol(name, slug, latest_tvl):
         "category": "Dexes",
         "chains": ["Ethereum", "Arbitrum", "Optimism"],
         "tvl": [
-            {"date": 1, "totalLiquidityUSD": latest_tvl * 0.95},
-            {"date": 2, "totalLiquidityUSD": latest_tvl},
+            {
+                "date": (TEST_NOW - timedelta(days=1)).timestamp(),
+                "totalLiquidityUSD": latest_tvl * 0.95,
+            },
+            {"date": TEST_NOW.timestamp(), "totalLiquidityUSD": latest_tvl},
         ],
     }
 

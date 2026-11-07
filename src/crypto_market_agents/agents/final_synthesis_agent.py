@@ -136,7 +136,12 @@ class FinalSynthesisAgent:
         if not active_reports:
             return RiskLevel.MEDIUM
 
-        risk_levels = [report.risk_level for report in active_reports]
+        # Prices and volatility consume the same market feed and represent one
+        # evidence family. Their agreement is not an independent second vote.
+        risk_levels = [
+            max((report.risk_level for report in group), key=_risk_rank)
+            for group in _evidence_groups(active_reports).values()
+        ]
         if any(level is RiskLevel.CRITICAL for level in risk_levels):
             return RiskLevel.CRITICAL
 
@@ -156,9 +161,12 @@ class FinalSynthesisAgent:
         if not reports:
             return 0.0
 
-        average_confidence = sum(report.confidence for report in reports) / len(reports)
-        expected_count = max(len(self.expected_agent_names), 1)
-        available_count = len({report.agent_name for report in reports})
+        groups = _evidence_groups(reports)
+        average_confidence = sum(
+            sum(report.confidence for report in group) / len(group) for group in groups.values()
+        ) / len(groups)
+        expected_count = max(len({_evidence_family(name) for name in self.expected_agent_names}), 1)
+        available_count = len(groups)
         coverage = min(available_count / expected_count, 1.0)
 
         confidence = average_confidence * (0.70 + (0.30 * coverage))
@@ -275,12 +283,17 @@ class FinalSynthesisAgent:
             and news_report
             and _has_positive_price_signal(price_report)
             and _has_negative_news_signal(news_report)
+            and (
+                _direction_assets(price_report, ImpactDirection.BULLISH)
+                & _direction_assets(news_report, ImpactDirection.BEARISH)
+            )
         ):
             contradictions.append("Marche prix positif mais actualites negatives.")
 
         if (
             onchain_report
             and volatility_report
+            and _common_assets(onchain_report, volatility_report)
             and onchain_report.risk_level is RiskLevel.LOW
             and risk_level_at_or_above(volatility_report.risk_level, RiskLevel.HIGH)
         ):
@@ -289,6 +302,7 @@ class FinalSynthesisAgent:
         if (
             price_report
             and news_report
+            and _common_assets(price_report, news_report)
             and price_report.risk_level is RiskLevel.LOW
             and risk_level_at_or_above(news_report.risk_level, RiskLevel.HIGH)
         ):
@@ -526,3 +540,60 @@ def _dedupe_text(values: Sequence[str]) -> list[str]:
             cleaned_values.append(cleaned)
 
     return cleaned_values
+
+
+def _evidence_family(agent_name: str) -> str:
+    if agent_name in {"price_market_agent", "volatility_risk_agent"}:
+        return "market"
+    return agent_name
+
+
+def _evidence_groups(reports: tuple[AgentReport, ...]) -> dict[str, list[AgentReport]]:
+    groups: dict[str, list[AgentReport]] = {}
+    for report in reports:
+        groups.setdefault(_evidence_family(report.agent_name), []).append(report)
+    return groups
+
+
+def _canonical_asset(value: str) -> str:
+    return {
+        "btc": "bitcoin",
+        "eth": "ethereum",
+        "sol": "solana",
+        "uni": "uniswap",
+        "ada": "cardano",
+        "xrp": "ripple",
+        "bnb": "binance",
+        "avax": "avalanche",
+    }.get(value.lower(), value.lower())
+
+
+def _report_asset_set(report: AgentReport) -> set[str]:
+    assets = set(_extract_assets_from_report(report))
+    for key in ("assets", "asset_metrics"):
+        items = report.data.get(key)
+        if not isinstance(items, Sequence) or isinstance(items, str):
+            continue
+        for item in items:
+            if isinstance(item, Mapping):
+                value = item.get("id") or item.get("symbol")
+                if value:
+                    assets.add(str(value))
+    return {_canonical_asset(asset) for asset in assets}
+
+
+def _common_assets(first: AgentReport, second: AgentReport) -> set[str]:
+    if AgentStatus.FAILED in {first.status, second.status}:
+        return set()
+    return _report_asset_set(first) & _report_asset_set(second)
+
+
+def _direction_assets(report: AgentReport, direction: ImpactDirection) -> set[str]:
+    if report.status is AgentStatus.FAILED:
+        return set()
+    assets: set[str] = set()
+    for finding in report.findings:
+        if finding.impact is direction:
+            assets.update(finding.symbols)
+            assets.update(_assets_from_text(f"{finding.title} {finding.description}"))
+    return {_canonical_asset(asset) for asset in assets}

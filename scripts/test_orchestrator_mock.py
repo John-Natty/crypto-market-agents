@@ -39,8 +39,8 @@ class StaticAgent:
 
 
 def main() -> None:
-    config = load_config(PROJECT_ROOT / ".env")
     output_dir = Path(tempfile.mkdtemp(prefix="crypto-market-orchestrator-"))
+    config = load_config(output_dir / ".env", include_os_environ=False)
     orchestrator = CryptoMarketOrchestrator(
         config=config,
         price_market_agent=StaticAgent("price_market_agent", RiskLevel.LOW),

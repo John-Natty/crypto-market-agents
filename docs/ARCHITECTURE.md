@@ -7,6 +7,23 @@ Le projet est une application Python multi-agents orientee analyse du marche
 crypto. Il ne fait pas de trading automatique, ne connecte aucun wallet et ne
 demande jamais de cle privee crypto.
 
+## Simulation de portefeuille
+
+Le nouveau paquet `trading/` reste isole de l'execution reelle :
+
+```text
+paper CLI -> cours publics Bitvavo / mock -> decisions rules / Ollama local
+         -> moteur de risque -> executions fictives -> etat JSON verrouille
+         -> rapports HTML / JSON / Markdown et dashboard existant
+```
+
+`models.py` definit les montants Decimal, les limites et les invariants;
+`engine.py` simule les fills; `store.py` gere verrouillage, validation et commit
+atomique; `market.py` ne lit que des cotations publiques; `decision.py` propose
+les decisions et valide les reponses structurees du modele. Un rapport des
+agents existants peut fournir un contexte supplementaire via `--analysis-report`.
+Voir [le guide complet](PAPER_TRADING.md).
+
 ## Vue Globale
 
 ```text
@@ -176,8 +193,9 @@ Les clients sont volontairement simples, testables et limites a leur domaine.
   WhatsApp Cloud API.
 
 CoinGecko, NewsAPI et DefiLlama sont des clients lecture seule. `WhatsAppClient`
-est le seul client qui effectue un `POST`, uniquement pour envoyer un message
-texte optionnel. Il ne gere pas de trading, wallet, paiement ou transfert.
+effectue un `POST` pour envoyer un message texte optionnel.
+Le connecteur Ollama effectue aussi un `POST` local pour demander une decision
+structuree, sans outil de trading. Il ne gere pas de trading, wallet, paiement ou transfert.
 
 ## Notifications WhatsApp
 

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from crypto_market_agents.agents.data_quality import (
+    finite_number,
+    utc_now,
+    validate_market_data,
+)
 from crypto_market_agents.clients.coingecko_client import CoinGeckoError
 from crypto_market_agents.schemas import (
     AgentReport,
@@ -73,7 +79,11 @@ class VolatilityRiskAgent:
         client: MarketDataClient,
         *,
         thresholds: VolatilityRiskThresholds | None = None,
+        now: Callable[[], datetime] = utc_now,
+        max_data_age: timedelta = timedelta(minutes=15),
     ) -> None:
+        self.now = now
+        self.max_data_age = max_data_age
         self.client = client
         self.thresholds = thresholds or VolatilityRiskThresholds()
 
@@ -99,6 +109,16 @@ class VolatilityRiskAgent:
         if not market_data:
             return self._failed_report("CoinGecko returned no market data.", source)
 
+        market_data, quality_errors = validate_market_data(
+            market_data,
+            clean_coin_ids,
+            self.important_fields,
+            now=self.now(),
+            max_age=self.max_data_age,
+        )
+        if not market_data:
+            return self._failed_report("No usable market data. " + " ".join(quality_errors), source)
+
         missing_fields = _missing_fields_by_asset(market_data, self.important_fields)
         returned_ids = {
             str(asset.get("id", "")).strip().lower() for asset in market_data if asset.get("id")
@@ -119,7 +139,11 @@ class VolatilityRiskAgent:
             requested_count=len(clean_coin_ids),
             missing_fields=missing_fields,
         )
-        errors = _build_partial_errors(missing_coin_ids, missing_fields)
+        errors = quality_errors + _build_partial_errors(missing_coin_ids, missing_fields)
+        if errors:
+            confidence = min(confidence, 0.60)
+            if risk_level is RiskLevel.LOW:
+                risk_level = RiskLevel.MEDIUM
         status = AgentStatus.PARTIAL if errors else AgentStatus.SUCCESS
 
         return AgentReport(
@@ -358,15 +382,14 @@ class VolatilityRiskAgent:
         if not scores:
             return RiskLevel.MEDIUM
 
-        critical_count = sum(score >= 6 for score in scores)
-        high_count = sum(3 <= score < 6 for score in scores)
-        medium_count = sum(1 <= score < 3 for score in scores)
-
-        if critical_count or sum(scores) >= 10:
+        # Each asset is assessed on the same scale. Adding more mild assets
+        # must not manufacture a critical event; one critical asset stays critical.
+        peak = max(scores)
+        if peak >= 6:
             return RiskLevel.CRITICAL
-        if high_count or max(scores) >= 4:
+        if peak >= 3:
             return RiskLevel.HIGH
-        if high_count or medium_count:
+        if peak >= 1:
             return RiskLevel.MEDIUM
 
         return RiskLevel.LOW
@@ -486,15 +509,7 @@ def _symbol(asset: dict[str, Any]) -> str:
 
 
 def _number(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        return float(value)
-
-    try:
-        return float(str(value).strip())
-    except ValueError:
-        return None
+    return finite_number(value)
 
 
 def _fmt(value: float) -> str:

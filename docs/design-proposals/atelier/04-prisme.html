@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Prisme — Market Agents</title>
+  <style>
+    :root {
+      --ink: #17283b; --muted: #6c788a; --blue: #475de1; --iris: #7780cb;
+      --mint: #208872; --line: rgba(45, 66, 96, .1); --paper: #f0f3f7;
+      --font: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font: 14px/1.5 var(--font); }
+    body::before { content: ""; position: absolute; z-index: -1; inset: 40px 0 auto; height: 820px; pointer-events: none; background: radial-gradient(ellipse at 75% 22%, rgba(111, 133, 235, .16), transparent 46%), radial-gradient(ellipse at 10% 50%, rgba(186, 218, 230, .18), transparent 40%); }
+    a { color: inherit; text-decoration: none; }
+    button { font: inherit; cursor: pointer; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 3px solid #6577ea; outline-offset: 5px; }
+    svg { display: block; max-width: 100%; }
+    .proposal { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px max(28px, calc((100vw - 1320px) / 2)); color: #596779; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.45); font-size: 10px; font-weight: 650; letter-spacing: 1.4px; }
+    .proposal-links { display: flex; flex-wrap: wrap; gap: 23px; letter-spacing: .4px; }
+    .proposal a:hover { color: var(--blue); }
+    .shell { max-width: 1376px; padding: 0 28px; margin: auto; }
+    .navigation { min-height: 99px; display: flex; align-items: center; justify-content: space-between; gap: 30px; border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 12px; font-size: 18px; letter-spacing: -.7px; font-weight: 650; white-space: nowrap; }
+    .brand-mark { width: 33px; height: 33px; position: relative; display: grid; place-items: center; }
+    .brand-mark::before, .brand-mark::after { content: ""; position: absolute; width: 16px; height: 26px; background: #4353ba; border-radius: 3px; transform: skewY(-24deg); }
+    .brand-mark::before { left: 0; opacity: .4; }
+    .brand-mark::after { right: 0; background: linear-gradient(150deg, #4b63df, #8794e4); }
+    .nav-links { display: flex; align-self: stretch; gap: 35px; align-items: center; color: var(--muted); font-size: 12px; }
+    .nav-links a { height: 100%; display: flex; align-items: center; position: relative; }
+    .nav-links a.active { color: var(--ink); font-weight: 650; }
+    .nav-links a.active::after { position: absolute; content: ""; bottom: -1px; height: 2px; inset-inline: 0; background: var(--blue); }
+    .live-status { display: flex; align-items: center; gap: 8px; color: #4b766d; font-size: 11px; white-space: nowrap; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #3b9d87; box-shadow: 0 0 0 4px rgba(67,151,130,.08); display: inline-block; flex-shrink: 0; }
+    .page-head { display: flex; justify-content: space-between; align-items: end; padding: 40px 0 29px; gap: 20px; }
+    .eyebrow { color: var(--muted); text-transform: uppercase; letter-spacing: 2px; font-size: 10px; font-weight: 650; }
+    h1 { margin: 8px 0 0; font-size: clamp(27px, 3vw, 36px); font-weight: 450; letter-spacing: -1.5px; line-height: 1.15; }
+    .page-head p { color: var(--muted); margin: 0; font-size: 12px; }
+    .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.86fr) minmax(310px, 1fr); gap: 22px; align-items: stretch; }
+    .capital-canvas { background: rgba(255,255,255,.69); border: 1px solid rgba(255,255,255,.95); border-radius: 23px; min-width: 0; overflow: hidden; box-shadow: 0 18px 45px -35px rgba(34,58,106,.25); }
+    .capital-head { padding: 30px 32px 0; display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+    .label { color: var(--muted); font-size: 12px; }
+    .capital { font-size: clamp(52px, 5.1vw, 73px); font-weight: 350; letter-spacing: -4px; line-height: 1.22; white-space: nowrap; margin-top: 7px; font-variant-numeric: tabular-nums; }
+    .capital .currency { color: #8793a7; font-size: .58em; margin-left: 4px; font-weight: 350; letter-spacing: -2px; }
+    .capital-detail { display: flex; align-items: center; gap: 12px; margin-top: 7px; flex-wrap: wrap; }
+    .gain { display: inline-flex; align-items: center; gap: 5px; color: var(--mint); font-size: 12px; font-weight: 600; }
+    .initial { color: #818b9b; font-size: 11px; }
+    .range-label { margin-top: 5px; padding: 6px 10px; color: #67748b; border: 1px solid var(--line); border-radius: 7px; font-size: 10px; white-space: nowrap; }
+    .chart-space { position: relative; margin: 5px 0 0; padding: 0 26px; }
+    .chart-space svg { width: 100%; height: auto; overflow: visible; }
+    .quote-island { position: absolute; top: 33px; left: 33px; display: flex; align-items: center; gap: 10px; background: rgba(255,255,255,.93); padding: 11px 14px; border-radius: 12px; border: 1px solid rgba(69,87,137,.075); box-shadow: 0 8px 26px rgba(78,93,130,.055); }
+    .bitcoin { display: grid; place-items: center; color: #a28246; background: #f6f0e5; border-radius: 50%; font-size: 17px; width: 28px; height: 28px; }
+    .quote-island strong { display: block; font-size: 12px; font-weight: 600; }
+    .quote-island small { color: var(--muted); font-size: 9px; letter-spacing: .3px; }
+    .chart-axis { display: flex; justify-content: space-between; padding: 0 5px 19px; color: #8a94a4; font-size: 9px; }
+    .metric-strip { display: grid; grid-template-columns: 1fr 1.4fr .82fr; padding: 23px 31px 25px; border-top: 1px solid var(--line); background: rgba(255,255,255,.48); }
+    .metric + .metric { border-left: 1px solid var(--line); padding-left: 24px; }
+    .metric strong { display: block; font-size: 24px; letter-spacing: -1px; font-weight: 450; margin: 5px 0 3px; white-space: nowrap; }
+    .metric small { font-size: 10px; color: #8290a1; }
+    .metric .label { font-size: 11px; }
+    .assistant { min-width: 0; display: flex; flex-direction: column; position: relative; padding: 26px 28px 25px; background: linear-gradient(154deg, rgba(255,255,255,.86), rgba(253,254,255,.62)); border: 1px solid rgba(255,255,255,.96); border-radius: 23px; box-shadow: 0 18px 45px -35px rgba(34,58,106,.25); }
+    .assistant-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .assistant-header .eyebrow { font-size: 9px; color: #758198; letter-spacing: 1.6px; }
+    .assistant-tag { font-size: 9px; letter-spacing: .3px; color: #7c88a2; border: 1px solid #e6eaf2; border-radius: 5px; padding: 3px 6px; }
+    .orbit { width: 130px; height: 130px; margin: 9px auto 4px; }
+    .assistant h2 { font-size: 28px; font-weight: 450; letter-spacing: -1px; line-height: 1.17; margin: 2px 0 13px; }
+    .assistant .observation { color: #758198; font-size: 12px; line-height: 1.85; margin: 0 0 22px; max-width: 270px; }
+    .decision { display: flex; align-items: center; gap: 9px; font-size: 11px; padding-top: 14px; border-top: 1px solid var(--line); color: #7a8699; margin-top: auto; }
+    .decision strong { font-weight: 550; color: #536491; }
+    .decision-mark { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; background: #edf0f9; color: #6f7eab; font-size: 10px; }
+    .talk-button { display: flex; align-items: center; justify-content: space-between; width: 100%; border: 0; padding: 13px 15px; margin-top: 16px; border-radius: 9px; background: #465bd3; color: white; font-size: 12px; box-shadow: 0 5px 14px rgba(68,87,192,.12); transition: background .18s, transform .18s; }
+    .talk-button:hover { background: #364bc3; transform: translateY(-1px); }
+    .talk-button svg { width: 15px; height: 15px; }
+    .cycle { display: flex; align-items: center; justify-content: center; gap: 6px; color: #8a93a4; font-size: 9px; margin-top: 12px; }
+    .cycle strong { color: #7180a0; font-variant-numeric: tabular-nums; font-weight: 500; }
+    .lower-grid { display: grid; grid-template-columns: minmax(0, 1.86fr) minmax(310px, 1fr); gap: 22px; margin-top: 32px; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; margin: 0 0 16px; gap: 14px; }
+    .section-heading h2 { font-size: 16px; letter-spacing: -.4px; font-weight: 550; margin: 0; }
+    .section-heading small { color: #8a93a4; font-size: 10px; }
+    .journal { border-top: 1px solid var(--line); }
+    .journal-row { display: grid; grid-template-columns: 50px 30px minmax(0,1fr) auto; gap: 11px; align-items: center; padding: 16px 2px; border-bottom: 1px solid var(--line); }
+    .journal-row time { color: #8891a0; font-size: 11px; font-variant-numeric: tabular-nums; }
+    .action-icon { width: 26px; height: 26px; border: 1px solid #dce2ec; display: grid; place-items: center; border-radius: 8px; color: #8b95a7; font-size: 10px; background: rgba(255,255,255,.3); }
+    .action-icon.buy { color: #378d7a; border-color: #d0e5df; background: #e7f1ed; font-size: 15px; }
+    .journal-row strong { display: block; font-size: 11px; font-weight: 550; }
+    .journal-row p { color: #8791a2; margin: 1px 0 0; font-size: 10px; }
+    .journal-row .amount { font-size: 11px; color: #6b7890; white-space: nowrap; }
+    .rules { background: rgba(255,255,255,.39); border: 1px solid rgba(255,255,255,.6); border-radius: 14px; padding: 18px 21px; }
+    .rule { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 9px 0; font-size: 11px; }
+    .rule + .rule { border-top: 1px solid var(--line); }
+    .rule span { color: #7c889a; }
+    .rule strong { font-weight: 550; font-size: 14px; white-space: nowrap; }
+    .rule-note { color: #8d97a6; font-size: 9px; margin: 12px 0 0; display: flex; align-items: center; gap: 7px; }
+    .rule-note svg { flex-shrink: 0; width: 12px; height: 12px; }
+    footer { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 37px 0 25px; color: #919aab; font-size: 9px; }
+    .signature { text-transform: uppercase; font-size: 9px; letter-spacing: 2px; white-space: nowrap; }
+    dialog { width: min(460px, calc(100% - 32px)); border: 1px solid white; border-radius: 22px; padding: 27px; color: var(--ink); background: #f7f9fd; box-shadow: 0 25px 110px #14224330; }
+    dialog::backdrop { background: rgba(35,47,72,.32); backdrop-filter: blur(5px); }
+    .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 15px; }
+    .dialog-head h2 { font-size: 20px; font-weight: 500; letter-spacing: -.5px; margin: 0; }
+    .close { background: white; border: 1px solid #e2e7f0; border-radius: 50%; width: 29px; height: 29px; font-size: 18px; color: #8190a5; }
+    .demo-note { color: #7c879b; font-size: 11px; margin: 13px 0 24px; line-height: 1.7; }
+    .bubble { border-radius: 13px; padding: 13px 15px; font-size: 12px; line-height: 1.8; margin: 12px 0; }
+    .bubble.user { background: #e8edfb; margin-left: 45px; color: #56658c; }
+    .bubble.agent { background: white; border: 1px solid #edf0f6; margin-right: 20px; }
+    .bubble small { display: block; color: #8895b1; font-size: 9px; margin-bottom: 5px; letter-spacing: 1px; }
+    .dialog-close { width: 100%; color: #65738f; background: transparent; border: 1px solid #dfe5f0; border-radius: 8px; padding: 11px; margin-top: 14px; font-size: 11px; }
+    @media (min-width: 1450px) { .page-head { padding-top: 43px; } .chart-space { margin-top: 1px; } }
+    @media (max-width: 1050px) {
+      .dashboard-grid, .lower-grid { grid-template-columns: minmax(0,1.55fr) minmax(285px,1fr); gap: 16px; }
+      .capital-head { padding: 26px 23px 0; }
+      .metric-strip { padding: 21px 23px; grid-template-columns: 1fr 1.2fr .75fr; }
+      .metric + .metric { padding-left: 16px; }
+      .metric strong { font-size: 21px; }
+      .metric small { font-size: 9px; }
+      .assistant { padding: 24px; }
+      .assistant h2 { font-size: 25px; }
+      .orbit { width: 115px; height: 115px; margin: 3px auto; }
+      .capital-canvas { display: flex; flex-direction: column; }
+      .chart-space { margin-top: auto; }
+      .quote-island { top: 14px; left: 25px; }
+      .nav-links { gap: 22px; }
+    }
+    @media (max-width: 790px) {
+      .proposal { padding-inline: 22px; }
+      .shell { padding-inline: 22px; }
+      .navigation { flex-wrap: wrap; gap: 0 18px; padding-top: 24px; }
+      .brand { font-size: 17px; }
+      .nav-links { width: 100%; order: 3; gap: 26px; height: 50px; margin-top: 13px; }
+      .live-status { margin-left: auto; font-size: 10px; }
+      .dashboard-grid, .lower-grid { grid-template-columns: 1fr; }
+      .page-head { padding: 29px 0 24px; }
+      .page-head p { display: none; }
+      .capital-head { padding: 26px 26px 0; }
+      .capital { font-size: 65px; }
+      .chart-space { margin-top: 4px; }
+      .quote-island { top: 20px; left: 29px; }
+      .assistant { padding: 23px 25px; display: grid; grid-template-columns: minmax(0,1fr) 115px; gap: 0 10px; }
+      .assistant-header { grid-column: 1 / -1; margin-bottom: 20px; }
+      .orbit { grid-column: 2; grid-row: 2 / 4; width: 110px; height: 110px; align-self: center; }
+      .assistant h2 { grid-column: 1; margin: 0 0 10px; font-size: 28px; }
+      .assistant .observation { grid-column: 1; margin: 0 0 20px; }
+      .decision, .talk-button, .cycle { grid-column: 1 / -1; }
+      .lower-grid { gap: 27px; margin-top: 29px; }
+      .metric-strip { padding: 22px 26px; }
+      .metric strong { font-size: 25px; }
+      footer { flex-direction: column; align-items: flex-start; padding-top: 30px; gap: 10px; }
+    }
+    @media (max-width: 450px) {
+      .proposal { padding: 10px 17px; align-items: flex-start; gap: 5px; flex-direction: column; font-size: 8px; letter-spacing: 1.2px; }
+      .proposal-links { font-size: 9px; gap: 18px; }
+      .shell { padding-inline: 17px; }
+      .brand { gap: 9px; font-size: 16px; }
+      .brand-mark { transform: scale(.85); transform-origin: left center; width: 29px; }
+      .live-status { font-size: 9px; gap: 6px; }
+      .nav-links { font-size: 11px; gap: 25px; }
+      .page-head { padding: 26px 0 21px; }
+      .eyebrow { font-size: 9px; }
+      h1 { font-size: 29px; letter-spacing: -1.15px; }
+      .capital-canvas, .assistant { border-radius: 18px; }
+      .capital-head { padding: 23px 20px 0; }
+      .capital { font-size: 61px; }
+      .range-label { padding: 5px 7px; font-size: 8px; margin-top: 2px; }
+      .capital-detail { gap: 8px; }
+      .initial { font-size: 10px; }
+      .chart-space { padding: 0 16px; margin-top: 27px; }
+      .quote-island { top: -11px; left: 19px; padding: 7px 9px; gap: 6px; border-radius: 9px; }
+      .bitcoin { width: 23px; height: 23px; font-size: 14px; }
+      .quote-island strong { font-size: 10px; }
+      .quote-island small { font-size: 8px; }
+      .chart-axis { padding-bottom: 17px; font-size: 8px; }
+      .metric-strip { padding: 18px 18px 19px; grid-template-columns: 1fr 1.15fr .75fr; }
+      .metric + .metric { padding-left: 12px; }
+      .metric .label { font-size: 9px; }
+      .metric strong { font-size: 20px; letter-spacing: -.8px; }
+      .metric small { font-size: 8px; display: block; line-height: 1.7; }
+      .assistant { padding: 22px 20px; grid-template-columns: minmax(0,1fr) 85px; gap: 0 2px; }
+      .assistant h2 { font-size: 26px; }
+      .assistant .observation { font-size: 11px; line-height: 1.8; }
+      .orbit { width: 92px; height: 110px; }
+      .assistant-header { margin-bottom: 22px; }
+      .journal-row { grid-template-columns: 38px 26px minmax(0,1fr) auto; gap: 8px; }
+      .journal-row p { font-size: 9px; max-width: 195px; }
+      .journal-row strong, .journal-row time, .journal-row .amount { font-size: 10px; }
+      .section-heading small { font-size: 9px; }
+      .rules { padding: 15px 18px; }
+    }
+    @media (max-width: 350px) {
+      .shell { padding-inline: 13px; }
+      .proposal { padding-inline: 13px; }
+      .live-status { font-size: 8px; }
+      .brand { font-size: 15px; }
+      .nav-links { gap: 20px; }
+      h1 { font-size: 26px; }
+      .capital-head { padding-inline: 16px; }
+      .capital { font-size: 54px; letter-spacing: -3px; }
+      .capital-detail { gap: 7px; }
+      .gain { font-size: 10px; }
+      .initial { font-size: 9px; }
+      .metric-strip { padding-inline: 14px; }
+      .metric + .metric { padding-left: 9px; }
+      .metric strong { font-size: 18px; }
+      .metric small { font-size: 7.5px; }
+      .assistant { padding-inline: 17px; grid-template-columns: minmax(0,1fr) 76px; }
+      .assistant h2 { font-size: 24px; }
+      .assistant .observation { font-size: 10px; }
+      .orbit { width: 82px; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .talk-button { transition: none; } }
+  </style>
+</head>
+<body>
+  <div class="proposal">
+    <span>PROPOSITION 04 · DONNÉES FICTIVES</span>
+    <div class="proposal-links"><a href="./index.html">← Les 5 propositions</a><a href="./05-atelier.html">Suivante : Atelier ↗</a></div>
+  </div>
+  <div class="shell">
+    <header class="navigation">
+      <a class="brand" href="#overview" aria-label="Market Agents, vue d’ensemble"><span class="brand-mark" aria-hidden="true"></span>Market Agents</a>
+      <nav class="nav-links" aria-label="Navigation principale"><a class="active" href="#overview" aria-current="page">Vue d'ensemble</a><a href="#journal">Activité</a><a href="#rules">Mes règles</a></nav>
+      <span class="live-status"><span class="status-dot"></span>Simulation active</span>
+    </header>
+    <main id="overview">
+      <div class="page-head">
+        <div><div class="eyebrow">Votre espace d'observation</div><h1>L’équilibre, en mouvement.</h1></div>
+        <p>Un portefeuille. Une perspective claire.</p>
+      </div>
+      <div class="dashboard-grid">
+        <section class="capital-canvas" aria-labelledby="capital-heading">
+          <div class="capital-head">
+            <div>
+              <div class="label" id="capital-heading">Valeur du portefeuille</div>
+              <div class="capital">51,20<span class="currency">€</span></div>
+              <div class="capital-detail"><span class="gain">↗ &nbsp;+1,20 € &nbsp; · &nbsp; +2,4 %</span><span class="initial">Depuis 50 € au départ</span></div>
+            </div>
+            <span class="range-label">Depuis le début</span>
+          </div>
+          <div class="chart-space">
+            <div class="quote-island"><span class="bitcoin" aria-hidden="true">₿</span><div><strong>80 000 €</strong><small>Bitcoin · cours fictif</small></div></div>
+            <svg viewBox="0 0 780 264" role="img" aria-labelledby="chart-title chart-desc">
+              <title id="chart-title">Évolution fictive du capital</title><desc id="chart-desc">Le capital commence à 50 euros et termine à 51,20 euros, avec des fluctuations intermédiaires.</desc>
+              <defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#8c9af2" stop-opacity=".19"/><stop offset="1" stop-color="#a8b3fa" stop-opacity="0"/></linearGradient><linearGradient id="line" x1="0" x2="1"><stop stop-color="#abb8eb"/><stop offset=".5" stop-color="#8290e7"/><stop offset="1" stop-color="#4b60d9"/></linearGradient></defs>
+              <path d="M5 82H772 M5 153H772 M5 224H772" stroke="#e8ecf4" stroke-width="1" stroke-dasharray="3 6"/>
+              <path d="M8 219C36 219 42 222 60 218S90 190 112 195S136 220 158 204S185 167 208 179S237 196 260 175S280 159 306 164S337 141 364 147S399 126 421 135S450 149 477 124S505 105 530 116S560 101 582 88S610 98 638 77S666 74 692 57S724 65 750 39V245H8Z" fill="url(#area)"/>
+              <path d="M8 219C36 219 42 222 60 218S90 190 112 195S136 220 158 204S185 167 208 179S237 196 260 175S280 159 306 164S337 141 364 147S399 126 421 135S450 149 477 124S505 105 530 116S560 101 582 88S610 98 638 77S666 74 692 57S724 65 750 39" fill="none" stroke="url(#line)" stroke-width="3" stroke-linecap="round"/>
+              <path d="M750 40V239" stroke="#cfd6f2" stroke-dasharray="3 5"/>
+              <circle cx="750" cy="39" r="10" fill="#586bdf" opacity=".09"/><circle cx="750" cy="39" r="4.5" fill="#5367dc" stroke="white" stroke-width="2"/>
+              <rect x="681" y="6" width="73" height="23" rx="7" fill="#edf0fc"/><text x="717" y="22" text-anchor="middle" fill="#5266c9" font-family="Arial,sans-serif" font-size="11">51,20 €</text>
+              <text x="8" y="245" fill="#9ca7ba" font-family="Arial,sans-serif" font-size="10">50,00 €</text>
+            </svg>
+            <div class="chart-axis"><span>Début de la simulation</span><span>Aujourd'hui</span></div>
+          </div>
+          <div class="metric-strip">
+            <div class="metric"><span class="label">Disponible</span><strong>31,20 €</strong><small>En liquidités</small></div>
+            <div class="metric"><span class="label">Position Bitcoin</span><strong>20,00 €</strong><small>0,00025 BTC · 39,1 %</small></div>
+            <div class="metric"><span class="label">Frais cumulés</span><strong>0,08 €</strong><small>Depuis le début</small></div>
+          </div>
+        </section>
+        <aside class="assistant" aria-labelledby="assistant-title">
+          <div class="assistant-header"><span class="eyebrow">Votre agent de marché</span><span class="assistant-tag">IA · aperçu</span></div>
+          <svg class="orbit" viewBox="0 0 140 140" aria-hidden="true">
+            <defs><radialGradient id="orb"><stop stop-color="#f7f9ff"/><stop offset=".6" stop-color="#dde3fb"/><stop offset="1" stop-color="#a1ace6"/></radialGradient><linearGradient id="orbit-ring"><stop stop-color="#7588d4" stop-opacity=".15"/><stop offset=".5" stop-color="#677ed6" stop-opacity=".55"/><stop offset="1" stop-color="#acb8dd" stop-opacity=".15"/></linearGradient></defs>
+            <ellipse cx="70" cy="70" rx="58" ry="23" transform="rotate(-34 70 70)" fill="none" stroke="url(#orbit-ring)"/>
+            <ellipse cx="70" cy="70" rx="48" ry="34" transform="rotate(50 70 70)" fill="none" stroke="#d8dff1" stroke-width=".8"/>
+            <circle cx="70" cy="70" r="25" fill="url(#orb)"/><circle cx="70" cy="70" r="17" fill="none" stroke="white" stroke-opacity=".5" stroke-width=".8"/>
+            <circle cx="113" cy="39" r="3.5" fill="#768ad1"/><circle cx="38" cy="37" r="2.5" fill="#a7b9cd"/><circle cx="25" cy="95" r="2.5" fill="#67aa9b"/>
+          </svg>
+          <h2 id="assistant-title">Une pause<br>réfléchie.</h2>
+          <p class="observation">Le mouvement observé ne justifie pas encore les frais.</p>
+          <div class="decision"><span class="decision-mark" aria-hidden="true">Ⅱ</span>Dernière action <strong>Attendre</strong></div>
+          <button class="talk-button" id="open-chat" type="button"><span>En parler avec mon agent</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="cycle">Prochaine observation <strong>02:18</strong> · illustratif</div>
+        </aside>
+      </div>
+      <div class="lower-grid">
+        <section id="journal" aria-labelledby="journal-title">
+          <div class="section-heading"><h2 id="journal-title">Le fil des décisions</h2><small>Aujourd'hui · 3 observations</small></div>
+          <div class="journal">
+            <div class="journal-row"><time>14:00</time><span class="action-icon" aria-hidden="true">Ⅱ</span><div><strong>Attendre le bon mouvement</strong><p>Le mouvement observé ne justifie pas encore les frais.</p></div><span class="amount">—</span></div>
+            <div class="journal-row"><time>13:55</time><span class="action-icon" aria-hidden="true">Ⅱ</span><div><strong>Position maintenue</strong><p>Observation du marché, sans nouvel ordre.</p></div><span class="amount">—</span></div>
+            <div class="journal-row"><time>10:00</time><span class="action-icon buy" aria-hidden="true">↗</span><div><strong>Achat de Bitcoin</strong><p>Ordre simulé dans les limites définies.</p></div><span class="amount">10,00 €</span></div>
+          </div>
+        </section>
+        <section id="rules" aria-labelledby="rules-title">
+          <div class="section-heading"><h2 id="rules-title">Un cadre défini</h2><small>Vos règles</small></div>
+          <div class="rules">
+            <div class="rule"><span>Maximum par ordre</span><strong>10 €</strong></div>
+            <div class="rule"><span>Maximum par position</span><strong>25 €</strong></div>
+            <div class="rule"><span>Perte avant blocage des achats</span><strong>5 €</strong></div>
+            <p class="rule-note"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m8 1 5 2v5c0 3-5 6-5 6S3 11 3 8V3l5-2Z" stroke="currentColor"/><path d="m5.5 7.5 1.7 1.7 3.3-3.7" stroke="currentColor"/></svg>La simulation suit ces limites à chaque décision.</p>
+          </div>
+        </section>
+      </div>
+    </main>
+    <footer><span>Aperçu de design · Chiffres et échanges fictifs · Aucun argent réel</span><span class="signature">Prisme / 04</span></footer>
+  </div>
+  <dialog id="chat-demo" aria-labelledby="chat-title" aria-describedby="chat-note">
+    <form method="dialog"><div class="dialog-head"><h2 id="chat-title">Une question à votre agent</h2><button class="close" aria-label="Fermer la démonstration">×</button></div></form>
+    <p class="demo-note" id="chat-note">Démonstration statique de la conversation. Aucun modèle n'est contacté et aucune opération n'est exécutée.</p>
+    <div class="bubble user">Pourquoi attendre maintenant ?</div>
+    <div class="bubble agent"><small>MARKET AGENTS · RÉPONSE FICTIVE</small>Le mouvement observé ne justifie pas encore les frais. Dans cet exemple, le portefeuille reste à 51,20 €, dont 31,20 € disponibles et 20 € en Bitcoin.</div>
+    <form method="dialog"><button class="dialog-close">Fermer l'aperçu</button></form>
+  </dialog>
+  <script>
+    const chatDialog = document.getElementById('chat-demo');
+    document.getElementById('open-chat').addEventListener('click', () => chatDialog.showModal());
+    chatDialog.addEventListener('click', event => {
+      if (event.target === chatDialog) {
+        const box = chatDialog.getBoundingClientRect();
+        if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) chatDialog.close();
+      }
+    });
+  </script>
+</body>
+</html>

@@ -133,6 +133,7 @@ class FinalSynthesisAgentTests(unittest.TestCase):
             make_report(
                 "volatility_risk_agent",
                 risk_level=RiskLevel.HIGH,
+                data={"asset_metrics": [{"id": "uniswap"}]},
             ),
             make_report(
                 "news_sentiment_agent",
@@ -147,7 +148,11 @@ class FinalSynthesisAgentTests(unittest.TestCase):
                 ),
                 data={"sentiment": SentimentLabel.NEGATIVE.value},
             ),
-            make_report("onchain_fundamental_agent", risk_level=RiskLevel.LOW),
+            make_report(
+                "onchain_fundamental_agent",
+                risk_level=RiskLevel.LOW,
+                data={"protocols": [{"slug": "uniswap"}]},
+            ),
         )
 
         final_report = FinalSynthesisAgent().synthesize(reports)

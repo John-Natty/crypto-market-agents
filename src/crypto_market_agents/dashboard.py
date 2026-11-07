@@ -1,16 +1,22 @@
-"""Lightweight local dashboard for already generated reports."""
+"""Local reports, read-only paper observation and contextual model discussion."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 import json
 from pathlib import Path
+from threading import Lock
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from crypto_market_agents.security import redact_text
+from crypto_market_agents.security import redact_mapping, redact_text
+from crypto_market_agents.trading.chat import ChatError, reply_to_chat, validate_chat_request
+from crypto_market_agents.trading.live import live_snapshot
+from crypto_market_agents.trading.live_view import render_live_dashboard
+import logging
 
 
 ALLOWED_REPORT_EXTENSIONS = {".json", ".html", ".md"}
@@ -51,13 +57,24 @@ def discover_reports(reports_dir: str | Path = "reports") -> list[ReportSummary]
     for path in base_dir.iterdir():
         if not path.is_file() or path.suffix.lower() not in ALLOWED_REPORT_EXTENSIONS:
             continue
-        grouped_files.setdefault(path.stem, {})[path.suffix.lower()] = path
+        try:
+            safe_path = resolve_report_path(base_dir, path.name)
+        except (DashboardSecurityError, FileNotFoundError):
+            continue
+        grouped_files.setdefault(path.stem, {})[path.suffix.lower()] = safe_path
 
-    summaries = [_build_summary(stem, files) for stem, files in grouped_files.items()]
+    summaries = []
+    for stem, files in grouped_files.items():
+        try:
+            summaries.append(_build_summary(stem, files))
+        except (OSError, ValueError):
+            logging.getLogger(__name__).warning("Rapport illisible ignore: %s", redact_text(stem))
     return sorted(summaries, key=lambda item: (item.modified_at, item.display_name), reverse=True)
 
 
-def render_dashboard_home(reports_dir: str | Path = "reports") -> str:
+def render_dashboard_home(
+    reports_dir: str | Path = "reports", *, live_enabled: bool = False
+) -> str:
     """Render the dashboard home page listing available reports."""
 
     reports = discover_reports(reports_dir)
@@ -70,6 +87,7 @@ def render_dashboard_home(reports_dir: str | Path = "reports") -> str:
         "Crypto Market Agents Dashboard",
         [
             '<header class="hero">',
+            '<a href="/live">← Suivi en direct</a>' if live_enabled else "",
             "<h1>Crypto Market Agents Dashboard</h1>",
             "<p>Lecture locale des rapports déjà générés dans le dossier reports/.</p>",
             "</header>",
@@ -96,7 +114,7 @@ def render_report_detail(reports_dir: str | Path, filename: str) -> str:
 
     sections = [
         '<header class="hero">',
-        '<a href="/">← Retour aux rapports</a>',
+        '<a href="/reports">← Retour aux rapports</a>',
         f"<h1>{_html(payload.get('title') or path.stem)}</h1>",
         '<div class="meta-row">',
         f'<span class="risk-badge risk-{_html(_risk_value(payload))}">'
@@ -159,7 +177,14 @@ def read_report_file(reports_dir: str | Path, filename: str) -> tuple[str, bytes
         ".md": "text/markdown; charset=utf-8",
     }[path.suffix.lower()]
 
-    content = redact_text(path.read_text(encoding="utf-8", errors="replace"))
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix.lower() == ".json":
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("A report must be a JSON object.")
+        content = json.dumps(redact_mapping(payload), ensure_ascii=False, indent=2)
+    else:
+        content = redact_text(raw)
     return content_type, content.encode("utf-8")
 
 
@@ -168,13 +193,16 @@ def serve_dashboard(
     reports_dir: str | Path = "reports",
     host: str = "127.0.0.1",
     port: int = 8000,
+    state: str | Path | None = None,
 ) -> None:
     """Start the local dashboard HTTP server."""
 
-    handler = make_dashboard_handler(reports_dir)
+    handler = make_dashboard_handler(reports_dir, state=state)
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Dashboard disponible: http://{host}:{port}")
     print(f"Dossier rapports: {Path(reports_dir)}")
+    if state is not None:
+        print(f"Suivi simule: {Path(state)} (actualisation toutes les 2 secondes)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -183,17 +211,156 @@ def serve_dashboard(
         server.server_close()
 
 
-def make_dashboard_handler(reports_dir: str | Path) -> type[BaseHTTPRequestHandler]:
+def make_dashboard_handler(
+    reports_dir: str | Path, *, state: str | Path | None = None
+) -> type[BaseHTTPRequestHandler]:
     """Return a BaseHTTPRequestHandler class bound to one reports directory."""
 
+    state_path = Path(state).expanduser().absolute() if state is not None else None
+    chat_lock = Lock()
+
     class DashboardRequestHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            if urlparse(self.path).path != "/api/chat":
+                self.send_error(501, "Unsupported method ('POST')")
+                return
+            # Always close after POST, including when an invalid body remains unread.
+            self.close_connection = True
+            try:
+                self._check_chat_origin()
+                message, history = validate_chat_request(self._read_chat_body())
+                if not chat_lock.acquire(blocking=False):
+                    raise ChatError(
+                        "L’agent prépare déjà une réponse. Réessayez dans un instant.",
+                        status=409,
+                        code="chat_busy",
+                    )
+                try:
+                    try:
+                        if state_path is None or not state_path.exists():
+                            raise FileNotFoundError
+                        snapshot = live_snapshot(state_path)
+                    except FileNotFoundError:
+                        raise ChatError(
+                            "Aucun portefeuille disponible pour cette discussion.",
+                            status=404,
+                            code="state_missing",
+                        ) from None
+                    except (ValueError, ArithmeticError):
+                        raise ChatError(
+                            "Le portefeuille est illisible. La discussion reprendra avec des données valides.",
+                            status=422,
+                            code="state_invalid",
+                        ) from None
+                    except OSError:
+                        raise ChatError(
+                            "Le portefeuille est temporairement inaccessible. Réessayez dans un instant.",
+                            status=503,
+                            code="state_unavailable",
+                        ) from None
+                    response = reply_to_chat(snapshot, message, history)
+                finally:
+                    chat_lock.release()
+                self._send_json(200, response)
+            except ChatError as exc:
+                self._send_json(exc.status, {"ok": False, "error": exc.code, "message": str(exc)})
+
+        def _check_chat_origin(self) -> None:
+            """Only a local page or local client can invoke the local model."""
+            denied = ChatError(
+                "Ouvrez la discussion depuis l’adresse locale du tableau de bord.",
+                status=403,
+                code="chat_origin",
+            )
+            try:
+                if not ip_address(self.client_address[0]).is_loopback:
+                    raise denied
+                hosts = self.headers.get_all("Host", [])
+                if len(hosts) != 1:
+                    raise denied
+                host = hosts[0]
+                address = urlsplit("http://" + host)
+                if (
+                    address.hostname not in {"localhost", "127.0.0.1", "::1"}
+                    or (address.port or 80) != self.server.server_port
+                    or address.username is not None
+                    or address.password is not None
+                    or address.path
+                    or address.query
+                    or address.fragment
+                ):
+                    raise denied
+                origins = self.headers.get_all("Origin", [])
+                if origins and origins != ["http://" + host]:
+                    raise denied
+                if self.headers.get("Sec-Fetch-Site") not in {None, "same-origin", "none"}:
+                    raise denied
+            except ValueError:
+                raise denied from None
+
+        def _read_chat_body(self) -> dict:
+            if self.headers.get_content_type() != "application/json":
+                raise ChatError(
+                    "Envoyez la question au format JSON.", status=415, code="chat_content_type"
+                )
+            lengths = self.headers.get_all("Content-Length", [])
+            if not lengths:
+                raise ChatError("La taille du message est requise.", status=411, code="chat_length")
+            if (
+                self.headers.get("Transfer-Encoding") is not None
+                or len(lengths) != 1
+                or not lengths[0].isascii()
+                or not lengths[0].isdigit()
+                or len(lengths[0]) > 8
+            ):
+                raise ChatError("Taille de message invalide.", status=400, code="chat_length")
+            length = int(lengths[0])
+            if length > 65_536:
+                raise ChatError("Message trop volumineux.", status=413, code="chat_too_large")
+            if length < 1:
+                raise ChatError("Écrivez une question.", status=400, code="chat_empty")
+            previous_timeout = self.connection.gettimeout()
+            self.connection.settimeout(5)
+            try:
+                raw = self.rfile.read(length)
+            except TimeoutError:
+                raise ChatError(
+                    "La réception du message a expiré. Réessayez.", status=408, code="chat_timeout"
+                ) from None
+            finally:
+                self.connection.settimeout(previous_timeout)
+            try:
+                if len(raw) != length:
+                    raise ValueError
+                return json.loads(raw.decode("utf-8"))
+            except (ValueError, RecursionError):
+                raise ChatError(
+                    "Le message reçu n’est pas un JSON valide.", status=400, code="chat_invalid"
+                ) from None
+
+        def _send_json(self, status: int, payload: dict) -> None:
+            self._send_bytes(
+                status,
+                "application/json; charset=utf-8",
+                json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+            )
+
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
 
+            if parsed.path == "/api/paper":
+                self._send_paper_snapshot()
+                return
+
             try:
-                if parsed.path == "/":
-                    self._send_html(render_dashboard_home(reports_dir))
+                if parsed.path in {"/", "/live"} and state_path is not None:
+                    self._send_html(render_live_dashboard())
+                    return
+                if parsed.path in {"/", "/reports"}:
+                    self._send_html(
+                        render_dashboard_home(reports_dir, live_enabled=state_path is not None)
+                    )
                     return
                 if parsed.path == "/report":
                     filename = _single_query_value(query, "file")
@@ -213,9 +380,16 @@ def make_dashboard_handler(reports_dir: str | Path) -> type[BaseHTTPRequestHandl
                     status=404,
                 )
                 return
-            except json.JSONDecodeError:
+            except ValueError:
                 self._send_html(
                     _error_page("Rapport invalide", "Le JSON du rapport est invalide."), status=422
+                )
+                return
+
+            except OSError:
+                self._send_html(
+                    _error_page("Rapport indisponible", "Le fichier ne peut pas être lu."),
+                    status=503,
                 )
                 return
 
@@ -226,6 +400,39 @@ def make_dashboard_handler(reports_dir: str | Path) -> type[BaseHTTPRequestHandl
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return
 
+        def _send_paper_snapshot(self) -> None:
+            status = 200
+            try:
+                if state_path is None or not state_path.exists():
+                    raise FileNotFoundError
+                payload = live_snapshot(state_path)
+            except FileNotFoundError:
+                status = 404
+                payload = {
+                    "ok": False,
+                    "error": "state_missing",
+                    "message": "Aucun portefeuille trouvé. Initialisez la simulation puis indiquez son fichier avec dashboard --state.",
+                }
+            except (ValueError, ArithmeticError):
+                status = 422
+                payload = {
+                    "ok": False,
+                    "error": "state_invalid",
+                    "message": "Le portefeuille est illisible ou incohérent. Les soldes ne peuvent pas être affichés.",
+                }
+            except OSError:
+                status = 503
+                payload = {
+                    "ok": False,
+                    "error": "state_unavailable",
+                    "message": "Le portefeuille est temporairement inaccessible. Nouvelle tentative automatique.",
+                }
+            self._send_bytes(
+                status,
+                "application/json; charset=utf-8",
+                json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+            )
+
         def _send_html(self, body: str, *, status: int = 200) -> None:
             self._send_bytes(status, "text/html; charset=utf-8", body.encode("utf-8"))
 
@@ -233,6 +440,9 @@ def make_dashboard_handler(reports_dir: str | Path) -> type[BaseHTTPRequestHandl
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(body)
 

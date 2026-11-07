@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import sys
 import unittest
@@ -9,6 +10,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from crypto_market_agents.agents.news_sentiment_agent import NewsSentimentAgent
 from crypto_market_agents.clients.news_client import NewsNetworkError
 from crypto_market_agents.schemas import AgentStatus, RiskLevel, SentimentLabel
+
+
+TEST_NOW = datetime.fromisoformat("2026-07-01T10:05:00+00:00")
+
+
+def make_agent(client, **kwargs):
+    return NewsSentimentAgent(client, now=lambda: TEST_NOW, **kwargs)
 
 
 class FakeNewsClient:
@@ -46,7 +54,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["bitcoin"], language="en")
+        report = make_agent(client).analyze(["bitcoin"], language="en")
 
         self.assertEqual(report.agent_name, "news_sentiment_agent")
         self.assertEqual(report.status, AgentStatus.SUCCESS)
@@ -70,7 +78,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(query="crypto lawsuit")
+        report = make_agent(client).analyze(query="crypto lawsuit")
 
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
         self.assertEqual(report.data["sentiment"], SentimentLabel.NEGATIVE.value)
@@ -89,7 +97,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["ethereum"])
+        report = make_agent(client).analyze(["ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
         self.assertEqual(report.data["sentiment"], SentimentLabel.NEGATIVE.value)
@@ -112,7 +120,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["bitcoin"])
+        report = make_agent(client).analyze(["bitcoin"])
 
         self.assertEqual(report.risk_level, RiskLevel.HIGH)
         self.assertEqual(report.data["sentiment"], SentimentLabel.NEGATIVE.value)
@@ -140,7 +148,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["ethereum"])
+        report = make_agent(client).analyze(["ethereum"])
 
         self.assertEqual(report.data["sentiment"], SentimentLabel.MIXED.value)
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
@@ -162,7 +170,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(query="crypto conference")
+        report = make_agent(client).analyze(query="crypto conference")
 
         self.assertEqual(report.risk_level, RiskLevel.LOW)
         self.assertEqual(report.data["sentiment"], SentimentLabel.NEUTRAL.value)
@@ -181,7 +189,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["bitcoin"])
+        report = make_agent(client).analyze(["bitcoin"])
         analysis = report.data["article_analyses"][0]
 
         self.assertEqual(report.risk_level, RiskLevel.CRITICAL)
@@ -189,7 +197,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
         self.assertIn("major", analysis["intensity_keywords"])
 
     def test_minor_or_limited_intensity_reduces_impact(self):
-        base_report = NewsSentimentAgent(
+        base_report = make_agent(
             FakeNewsClient(
                 [
                     article(
@@ -200,7 +208,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
                 ]
             )
         ).analyze(["bitcoin"])
-        limited_report = NewsSentimentAgent(
+        limited_report = make_agent(
             FakeNewsClient(
                 [
                     article(
@@ -232,7 +240,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(query="crypto")
+        report = make_agent(client).analyze(query="crypto")
         assets = report.data["article_analyses"][0]["related_assets"]
 
         self.assertIn("bitcoin", assets)
@@ -251,7 +259,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(query="developer solution")
+        report = make_agent(client).analyze(query="developer solution")
 
         self.assertNotIn("solana", report.data["article_analyses"][0]["related_assets"])
 
@@ -268,14 +276,14 @@ class NewsSentimentAgentTests(unittest.TestCase):
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["bitcoin"])
+        report = make_agent(client).analyze(["bitcoin"])
 
         self.assertEqual(len(report.findings), 8)
 
     def test_confidence_is_lower_with_few_incomplete_articles(self):
         client = FakeNewsClient([article(title="Crypto update", description=None, content=None)])
 
-        report = NewsSentimentAgent(client).analyze(query="crypto")
+        report = make_agent(client).analyze(query="crypto")
 
         self.assertLess(report.confidence, 0.5)
 
@@ -286,20 +294,20 @@ class NewsSentimentAgentTests(unittest.TestCase):
                     title=f"Ethereum adoption growth article {index}",
                     description="Institutional integration and partnership improve confidence.",
                     content="Approval and inflow signals are described with context.",
-                    url=f"https://example.com/complete-{index}",
+                    url=f"https://publisher-{index}.example.com/complete-{index}",
                 )
                 for index in range(5)
             ]
         )
 
-        report = NewsSentimentAgent(client).analyze(["ethereum"])
+        report = make_agent(client).analyze(["ethereum"])
 
         self.assertGreater(report.confidence, 0.75)
 
     def test_analyze_no_articles_returns_partial_report(self):
         client = FakeNewsClient([])
 
-        report = NewsSentimentAgent(client).analyze(query="quiet crypto topic")
+        report = make_agent(client).analyze(query="quiet crypto topic")
 
         self.assertEqual(report.status, AgentStatus.PARTIAL)
         self.assertEqual(report.risk_level, RiskLevel.LOW)
@@ -312,7 +320,7 @@ class NewsSentimentAgentTests(unittest.TestCase):
     def test_analyze_returns_failed_when_client_errors(self):
         client = FakeNewsClient(error=NewsNetworkError("network down"))
 
-        report = NewsSentimentAgent(client).analyze(["bitcoin"])
+        report = make_agent(client).analyze(["bitcoin"])
 
         self.assertEqual(report.status, AgentStatus.FAILED)
         self.assertEqual(report.confidence, 0.0)
@@ -325,7 +333,7 @@ def article(
     description="",
     content="",
     *,
-    url="https://example.com/article",
+    url=None,
     published_at="2026-07-01T09:00:00Z",
 ):
     return {
@@ -333,7 +341,7 @@ def article(
         "description": description,
         "content": content,
         "source": {"id": "test", "name": "Test News"},
-        "url": url,
+        "url": url or "https://example.com/" + title.lower().replace(" ", "-"),
         "publishedAt": published_at,
     }
 

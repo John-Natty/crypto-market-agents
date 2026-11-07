@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 import sys
 import unittest
@@ -9,6 +10,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from crypto_market_agents.agents.price_market_agent import PriceMarketAgent
 from crypto_market_agents.clients.coingecko_client import CoinGeckoNetworkError
 from crypto_market_agents.schemas import AgentStatus, RiskLevel
+
+
+TEST_NOW = datetime.fromisoformat("2026-06-30T10:05:00+00:00")
+
+
+def make_agent(client, **kwargs):
+    return PriceMarketAgent(client, now=lambda: TEST_NOW, **kwargs)
 
 
 class FakeCoinGeckoClient:
@@ -51,7 +59,7 @@ class PriceMarketAgentTests(unittest.TestCase):
             ]
         )
 
-        report = PriceMarketAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.agent_name, "price_market_agent")
         self.assertEqual(report.status, AgentStatus.SUCCESS)
@@ -84,7 +92,7 @@ class PriceMarketAgentTests(unittest.TestCase):
             ]
         )
 
-        report = PriceMarketAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.HIGH)
         self.assertTrue(any(finding.title == "Forte hausse 24h" for finding in report.findings))
@@ -113,7 +121,7 @@ class PriceMarketAgentTests(unittest.TestCase):
             ]
         )
 
-        report = PriceMarketAgent(client).analyze(["solana", "ethereum"])
+        report = make_agent(client).analyze(["solana", "ethereum"])
 
         self.assertEqual(report.risk_level, RiskLevel.MEDIUM)
         self.assertTrue(any(finding.title == "Forte baisse 24h" for finding in report.findings))
@@ -127,11 +135,12 @@ class PriceMarketAgentTests(unittest.TestCase):
                     "name": "Bitcoin",
                     "current_price": 100000,
                     "price_change_percentage_24h": 2,
+                    "last_updated": TEST_NOW.isoformat(),
                 }
             ]
         )
 
-        report = PriceMarketAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.status, AgentStatus.PARTIAL)
         self.assertLess(report.confidence, 0.95)
@@ -142,7 +151,7 @@ class PriceMarketAgentTests(unittest.TestCase):
     def test_analyze_returns_failed_when_client_errors(self):
         client = FakeCoinGeckoClient(error=CoinGeckoNetworkError("network down"))
 
-        report = PriceMarketAgent(client).analyze(["bitcoin", "ethereum"])
+        report = make_agent(client).analyze(["bitcoin", "ethereum"])
 
         self.assertEqual(report.status, AgentStatus.FAILED)
         self.assertEqual(report.confidence, 0.0)

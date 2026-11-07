@@ -1,6 +1,7 @@
 # Security Policy
 
-Crypto Market Agents is a read-only market analysis project. It must never
+Crypto Market Agents analyzes public markets and simulates portfolios. All
+exchange access remains read-only. It must never
 receive crypto private keys, seed phrases, wallet credentials, withdrawal
 permissions, or trading permissions.
 
@@ -45,8 +46,12 @@ When reporting a vulnerability, include:
 
 ## Project Safety Boundaries
 
-This project does not do automatic trading and must not execute buy, sell,
-short, transfer, withdrawal, or order placement actions.
+This project must not place real orders, transfer funds, withdraw or short.
+The `paper` workflow records fictitious buy/sell fills in a local ledger.
+Its optional Ollama connector requests decisions from a local model with no
+execution tools or account credentials; responses cannot modify persisted risk
+limits. Public Bitvavo access only uses GET market-data endpoints.
+Corrupt state blocks further simulation rather than resetting the balance.
 
 The default safety posture is:
 
@@ -69,5 +74,5 @@ Security reports are welcome for:
 - dependency or GitHub Actions issues;
 - path, file, logging, or report rendering issues that could expose secrets.
 
-Requests to add trading, wallet management, private key handling, or financial
-advice are out of scope for this project.
+Real execution adapters, wallet management and private key handling are outside
+the current release. Simulated trading is documented in docs/PAPER_TRADING.md.

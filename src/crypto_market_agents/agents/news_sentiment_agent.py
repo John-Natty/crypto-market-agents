@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from typing import Any, Protocol
 
+from crypto_market_agents.agents.data_quality import is_fresh, parse_timestamp, utc_now
 from crypto_market_agents.clients.news_client import NewsError
 from crypto_market_agents.schemas import (
     AgentReport,
@@ -228,7 +231,11 @@ class NewsSentimentAgent:
         *,
         default_query: str | None = None,
         max_articles: int | None = None,
+        now: Callable[[], datetime] = utc_now,
+        max_article_age: timedelta = timedelta(days=7),
     ) -> None:
+        self.now = now
+        self.max_article_age = max_article_age
         self.client = client
         self.default_query = default_query or getattr(
             client,
@@ -285,15 +292,24 @@ class NewsSentimentAgent:
                 },
             )
 
+        articles, quality_errors, duplicates = _select_articles(
+            articles, now=self.now(), max_age=self.max_article_age
+        )
+        if not articles:
+            return self._failed_report(
+                "No recent, dated articles. " + " ".join(quality_errors), source, selected_query
+            )
         analyses = [self._analyze_article(article) for article in articles]
         findings = self._build_findings(articles, analyses, coin_ids)
         sentiment = self._global_sentiment(analyses)
         risk_level = self._risk_level(analyses)
         confidence = self._confidence(articles, analyses)
+        if quality_errors:
+            confidence = min(confidence, 0.60)
 
         return AgentReport(
             agent_name=self.agent_name,
-            status=AgentStatus.SUCCESS,
+            status=AgentStatus.PARTIAL if quality_errors else AgentStatus.SUCCESS,
             summary=self._summary(
                 article_count=len(articles),
                 finding_count=len(findings),
@@ -304,13 +320,15 @@ class NewsSentimentAgent:
             confidence=confidence,
             findings=tuple(findings),
             sources=(source,),
-            errors=(),
+            errors=tuple(quality_errors),
             data={
                 "query": selected_query,
                 "language": language.lower(),
                 "sentiment": sentiment.value,
                 "sentiment_score": round(sum(item.sentiment_score for item in analyses), 2),
                 "categories": list(_unique_category_list(analyses)),
+                "duplicates_removed": duplicates,
+                "independent_source_count": len({_publisher_key(article) for article in articles}),
                 "articles": [_clean_article_for_report(article) for article in articles],
                 "article_analyses": [analysis.to_dict() for analysis in analyses],
             },
@@ -463,7 +481,8 @@ class NewsSentimentAgent:
         if not articles:
             return 0.0
 
-        article_volume = min(len(articles) / max(min(self.max_articles, 6), 1), 1.0)
+        source_count = len({_publisher_key(article) for article in articles})
+        article_volume = min(source_count / max(min(self.max_articles, 6), 1), 1.0)
         content_quality = sum(analysis.content_quality for analysis in analyses) / len(analyses)
         signal_ratio = sum(analysis.has_signal for analysis in analyses) / len(analyses)
         signal_strength = min(
@@ -480,7 +499,7 @@ class NewsSentimentAgent:
             + (0.16 * signal_ratio)
             + (0.09 * signal_strength)
         )
-        if len(articles) == 1:
+        if source_count == 1:
             confidence -= 0.10
         if low_signal_conflict:
             confidence -= 0.07
@@ -589,6 +608,34 @@ def _keyword_count(text: str, keyword: str) -> int:
     return len(re.findall(pattern, text))
 
 
+def _signal_count(text: str, keyword: str) -> int:
+    """Ignore explicitly negated or denied mentions in the local clause.
+
+    This is a conservative lexical filter, not a claim of language understanding.
+    An affirmed second occurrence ("no hack yesterday, but a hack today") still counts.
+    """
+    escaped = re.escape(_normalize_text(keyword)).replace(r"\ ", r"[\s-]+")
+    count = 0
+    for match in re.finditer(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text):
+        before = re.split(r"[.;!?]|\b(?:but|however)\b", text[: match.start()])[-1]
+        after = re.split(r"[.;!?]|\b(?:but|however)\b", text[match.end() :])[0]
+        negated_before = re.search(
+            r"\b(?:no|not|without|denies|denied|deny|debunks|refutes|dismisses|aucun|sans)"
+            r"(?:\s+[a-z'-]+){0,4}\s*$",
+            before,
+        )
+        negated_after = re.match(
+            r"\s+(?:(?:did|does|has|have)\s+not\s+(?:occur|happen)|"
+            r"(?:was|is|were|are)\s+(?:denied|false|debunked|ruled out)|"
+            r"(?:rumou?rs?|reports?|claims?)\s+(?:(?:was|were|are|is)\s+)?"
+            r"(?:false|denied|debunked))\b",
+            after,
+        )
+        if not negated_before and not negated_after:
+            count += 1
+    return count
+
+
 def _weighted_scores(text: str) -> tuple[float, float, set[str], set[str]]:
     positive_score = 0.0
     negative_score = 0.0
@@ -597,7 +644,7 @@ def _weighted_scores(text: str) -> tuple[float, float, set[str], set[str]]:
 
     for category, keywords in POSITIVE_KEYWORDS.items():
         for keyword, weight in keywords.items():
-            count = min(_keyword_count(text, keyword), 3)
+            count = min(_signal_count(text, keyword), 3)
             if count:
                 positive_score += weight * count
                 categories.add(category)
@@ -605,7 +652,7 @@ def _weighted_scores(text: str) -> tuple[float, float, set[str], set[str]]:
 
     for category, keywords in NEGATIVE_KEYWORDS.items():
         for keyword, weight in keywords.items():
-            count = min(_keyword_count(text, keyword), 3)
+            count = min(_signal_count(text, keyword), 3)
             if count:
                 negative_score += weight * count
                 categories.add(category)
@@ -617,7 +664,7 @@ def _weighted_scores(text: str) -> tuple[float, float, set[str], set[str]]:
 def _matched_intensity_keywords(text: str) -> set[str]:
     matched = set()
     for keyword in (*STRONG_INTENSITY_KEYWORDS, *WEAK_INTENSITY_KEYWORDS):
-        if _keyword_count(text, keyword):
+        if _signal_count(text, keyword):
             matched.add(keyword)
 
     return matched
@@ -637,7 +684,7 @@ def _risk_signals(text: str, negative_score: float) -> set[str]:
 
     for category, keywords in NEGATIVE_KEYWORDS.items():
         for keyword, weight in keywords.items():
-            if weight <= -3 and _keyword_count(text, keyword):
+            if weight <= -3 and _signal_count(text, keyword):
                 signals.add(f"{category}:{keyword}")
 
     return signals
@@ -671,11 +718,11 @@ def _article_risk_level(
 ) -> RiskLevel:
     strong_intensity = any(keyword in intensity_keywords for keyword in STRONG_INTENSITY_KEYWORDS)
     weak_intensity = any(keyword in intensity_keywords for keyword in WEAK_INTENSITY_KEYWORDS)
-    has_critical_security = any(_keyword_count(text, keyword) for keyword in CRITICAL_RISK_KEYWORDS)
-    has_major_liquidation = _keyword_count(text, "major liquidation") or (
-        _keyword_count(text, "liquidation") and strong_intensity
+    has_critical_security = any(_signal_count(text, keyword) for keyword in CRITICAL_RISK_KEYWORDS)
+    has_major_liquidation = _signal_count(text, "major liquidation") or (
+        _signal_count(text, "liquidation") and strong_intensity
     )
-    has_major_crackdown = _keyword_count(text, "regulatory crackdown") and strong_intensity
+    has_major_crackdown = _signal_count(text, "regulatory crackdown") and strong_intensity
 
     if has_critical_security or has_major_liquidation or has_major_crackdown:
         return RiskLevel.CRITICAL
@@ -819,3 +866,65 @@ def _content_quality(article: dict[str, Any]) -> float:
     )
     present = sum(1 for field in fields if _optional_article_text(field))
     return present / len(fields)
+
+
+def _publisher_key(article: dict[str, Any]) -> str:
+    # Syndicated stories from the same domain do not become independent evidence.
+    try:
+        host = urlsplit(str(article.get("url") or "")).hostname
+    except ValueError:
+        host = None
+    return (host or _article_source_name(article) or "unknown").lower().removeprefix("www.")
+
+
+def _select_articles(
+    articles: list[dict[str, Any]], *, now: datetime, max_age: timedelta
+) -> tuple[list[dict[str, Any]], list[str], int]:
+    selected: list[dict[str, Any]] = []
+    errors: list[str] = []
+    urls: set[str] = set()
+    titles: set[str] = set()
+    events: set[tuple[str, ...]] = set()
+    duplicates = 0
+    for article in articles:
+        if not isinstance(article, dict):
+            errors.append("Invalid article payload.")
+            continue
+        timestamp = parse_timestamp(article.get("publishedAt"))
+        if timestamp is None or not is_fresh(timestamp, now, max_age):
+            errors.append("Discarded article with missing, invalid, future or stale publishedAt.")
+            continue
+        title = _normalize_text(article.get("title"))
+        if not title:
+            errors.append("Discarded article without a title.")
+            continue
+        try:
+            parsed = urlsplit(str(article.get("url") or ""))
+            query = urlencode(
+                sorted(
+                    (key, value)
+                    for key, value in parse_qsl(parsed.query)
+                    if not key.lower().startswith("utm_") and key.lower() not in {"fbclid", "gclid"}
+                )
+            )
+            canonical_url = f"{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+            if query:
+                canonical_url += "?" + query
+        except ValueError:
+            canonical_url = ""
+        # A small event fingerprint catches reordered syndicated headlines and
+        # cosmetic 'breaking/update' prefixes. It does not infer unrelated events.
+        tokens = tuple(sorted(set(re.findall(r"[a-z0-9]+", title)) - {"breaking", "update"}))
+        if (
+            (canonical_url and canonical_url in urls)
+            or title in titles
+            or (len(tokens) >= 4 and tokens in events)
+        ):
+            duplicates += 1
+            continue
+        if canonical_url:
+            urls.add(canonical_url)
+        titles.add(title)
+        events.add(tokens)
+        selected.append(article)
+    return selected, list(dict.fromkeys(errors)), duplicates

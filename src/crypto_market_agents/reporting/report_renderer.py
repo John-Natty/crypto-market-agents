@@ -6,6 +6,7 @@ from html import escape
 import json
 from pathlib import Path
 
+from crypto_market_agents.file_utils import atomic_write_text
 from crypto_market_agents.schemas import (
     AgentFinding,
     AgentReport,
@@ -142,7 +143,7 @@ def save_markdown_report(final_report: FinalReport, output_path: str) -> None:
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_final_report_markdown(final_report), encoding="utf-8")
+    atomic_write_text(path, render_final_report_markdown(final_report))
 
 
 def save_json_report(final_report: FinalReport, output_path: str) -> None:
@@ -150,7 +151,7 @@ def save_json_report(final_report: FinalReport, output_path: str) -> None:
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_final_report_json(final_report), encoding="utf-8")
+    atomic_write_text(path, render_final_report_json(final_report))
 
 
 def save_html_report(final_report: FinalReport, output_path: str) -> None:
@@ -158,7 +159,7 @@ def save_html_report(final_report: FinalReport, output_path: str) -> None:
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_final_report_html(final_report), encoding="utf-8")
+    atomic_write_text(path, render_final_report_html(final_report))
 
 
 def _section(title: str, body: str) -> str:

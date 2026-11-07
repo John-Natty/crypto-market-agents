@@ -1,7 +1,8 @@
 # Contributing
 
 Thanks for helping improve Crypto Market Agents. The project is intentionally
-read-only: no trading, no wallets, no private keys, and no financial advice.
+read-only toward exchanges: no real trading, wallets or private keys. Simulated
+orders in the isolated `paper` workflow are supported. See docs/PAPER_TRADING.md.
 
 ## Local Setup
 
@@ -103,8 +104,9 @@ Open a pull request with:
 - Never add a real API key or token.
 - Never add a crypto private key, seed phrase, wallet file, or wallet
   connection flow.
-- Never add automatic trading, buy orders, sell orders, shorting, withdrawals,
-  or order execution.
+- Never add real automatic trading, live order placement, shorting or withdrawals.
+- Simulated buy/sell decisions must pass the independent risk engine, preserve
+  exact accounting, and remain explicitly labelled as paper trading.
 - Never send real WhatsApp messages in tests.
 - Never add tests that require CoinGecko, NewsAPI, DefiLlama, WhatsApp, or any
   external API to be reachable.
