@@ -7,6 +7,7 @@ import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from io import BytesIO
 import hashlib
 import json
 from pathlib import Path
@@ -270,8 +271,15 @@ def send_request_with_retries(
                     reason=f"HTTP {exc.code}",
                     url=request.full_url,
                 )
+                exc.close()
                 continue
-            raise
+            try:
+                body = exc.read()
+            except OSError:
+                body = b""
+            url, status, reason, headers = exc.url, exc.code, exc.msg, exc.headers
+            exc.close()
+            raise HTTPError(url, status, reason, headers, BytesIO(body)) from None
         except (TimeoutError, socket.timeout) as exc:
             if _can_retry_attempt(attempt, selected_settings.max_retries):
                 _sleep_before_retry(

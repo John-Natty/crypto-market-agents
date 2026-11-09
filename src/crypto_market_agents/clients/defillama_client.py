@@ -180,11 +180,14 @@ class DefiLlamaClient:
             status_code = response.status_code
             body = response.body
         except HTTPError as exc:
+            body = redact_text(_read_text(exc))
+            status_code = exc.code
+            exc.close()
             raise DefiLlamaAPIError(
                 endpoint=redact_text(endpoint),
-                status_code=exc.code,
-                body=redact_text(_read_text(exc)),
-            ) from exc
+                status_code=status_code,
+                body=body,
+            ) from None
         except (TimeoutError, socket.timeout) as exc:
             raise DefiLlamaTimeoutError(f"DefiLlama request to {endpoint} timed out.") from exc
         except URLError as exc:

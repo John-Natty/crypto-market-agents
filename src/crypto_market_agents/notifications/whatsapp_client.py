@@ -147,11 +147,14 @@ class WhatsAppClient:
                 status_code = _response_status(response)
                 body = _read_text(response)
         except HTTPError as exc:
+            status_code = exc.code
+            error_text = self._safe_error_text(_read_text(exc))
+            exc.close()
             return _result(
                 sent=False,
                 status="http_error",
                 message="WhatsApp API rejected the message.",
-                error=f"HTTP {exc.code}: {self._safe_error_text(_read_text(exc))}",
+                error=f"HTTP {status_code}: {error_text}",
             )
         except (TimeoutError, socket.timeout) as exc:
             return _result(

@@ -48,6 +48,95 @@ class HistoryMetricTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["latest_volume_vs_previous_20_mean"], "1.2121")
         self.assertTrue(quality["fresh"])
 
+    def test_irregular_close_intervals_are_not_treated_as_one_hour_returns(self):
+        rows = series(8)
+        rows = [row for index, row in enumerate(rows) if index != 3]
+        candles, _ = normalize_candles(rows, interval="1h", now=NOW)
+        result = calculate_metrics(candles, interval="1h", now=NOW)
+        metrics = result["metrics"]
+        contiguous = [
+            float(candles[i].close / candles[i - 1].close - 1)
+            for i in range(1, len(candles))
+            if candles[i].timestamp - candles[i - 1].timestamp == timedelta(hours=1)
+        ]
+        self.assertEqual(metrics["contiguous_interval_returns_used"], len(contiguous))
+        self.assertEqual(len(contiguous), 5)
+        # The two-hour price move across the omitted timestamp is not counted as an hourly return.
+        expected_hourly = contiguous
+        mean = sum(expected_hourly) / len(expected_hourly)
+        expected_volatility = (
+            sum((value - mean) ** 2 for value in expected_hourly) / (len(expected_hourly) - 1)
+        ) ** 0.5 * 100
+        self.assertEqual(
+            Decimal(metrics["return_volatility_pct_per_interval"]),
+            Decimal(str(expected_volatility)).quantize(Decimal("0.0001")),
+        )
+
+    def test_time_horizons_and_sma_require_exact_contiguous_windows(self):
+        rows = [row for index, row in enumerate(series(60)) if index not in {35, 50}]
+        candles, _ = normalize_candles(rows, interval="1h", now=NOW)
+        result = calculate_metrics(candles, interval="1h", now=NOW)
+        metrics = result["metrics"]
+        # The exact 24h baseline (latest timestamp minus 24 hours) is absent.
+        self.assertIsNone(metrics["returns_pct"]["24h"])
+        # The gap at index 50 breaks the trailing 20-hour moving-average window.
+        self.assertIsNone(metrics["sma20_close"])
+        self.assertFalse(metrics["sma20_window_contiguous"])
+
+    def test_old_gap_does_not_invalidate_recent_contiguous_metrics(self):
+        rows = [row for index, row in enumerate(series(80)) if index != 5]
+        candles, quality = normalize_candles(rows, interval="1h", now=NOW)
+        result = calculate_metrics(candles, interval="1h", now=NOW)
+        self.assertTrue(quality["gaps"])
+        self.assertTrue(result["metric_quality"]["sma20_close"]["available"])
+        self.assertTrue(result["metric_quality"]["sma20_vs_sma50_pct"]["available"])
+        self.assertTrue(result["metric_quality"]["returns_pct.24h"]["available"])
+        self.assertFalse(result["metric_quality"]["returns_pct.7d"]["available"])
+        self.assertIsNotNone(result["metric_quality"]["returns_pct.7d"]["reason"])
+
+    def test_each_metric_quality_exposes_window_freshness_and_unavailability_reason(self):
+        candles, _ = normalize_candles(series(60), interval="1h", now=NOW)
+        result = calculate_metrics(candles, interval="1h", now=NOW)
+        quality = result["metric_quality"]
+        self.assertTrue(quality["returns_pct.24h"]["available"])
+        self.assertEqual(quality["returns_pct.24h"]["observation_count"], 2)
+        self.assertEqual(
+            quality["returns_pct.24h"]["window"]["start_at"], candles[-25].timestamp.isoformat()
+        )
+        self.assertTrue(quality["returns_pct.24h"]["freshness"]["fresh"])
+        self.assertFalse(quality["returns_pct.30d"]["available"])
+        self.assertIsNotNone(quality["returns_pct.30d"]["reason"])
+
+    def test_720_hourly_candles_cannot_span_two_closes_thirty_days_apart(self):
+        start = int(NOW.timestamp() * 1000) - 721 * HOUR
+        seven_twenty = [
+            [
+                start + index * HOUR,
+                str(index + 1),
+                str(index + 1),
+                str(index + 1),
+                str(index + 1),
+                "1",
+            ]
+            for index in range(720)
+        ]
+        candles, _ = normalize_candles(seven_twenty, interval="1h", now=NOW)
+        self.assertIsNone(
+            calculate_metrics(candles, interval="1h", now=NOW)["metrics"]["returns_pct"]["30d"]
+        )
+        no_reference = calculate_metrics(candles, interval="1h", now=NOW)
+        self.assertTrue(
+            any(
+                "historique insuffisant: aucune donnée jusqu'à la cible" in reason
+                for reason in no_reference["reasons"]
+            )
+        )
+
+        seven_twenty_one = seven_twenty + [[start + 720 * HOUR, "721", "721", "721", "721", "1"]]
+        candles, _ = normalize_candles(seven_twenty_one, interval="1h", now=NOW)
+        value = calculate_metrics(candles, interval="1h", now=NOW)["metrics"]["returns_pct"]["30d"]
+        self.assertEqual(value, "72000.0000")
+
     def test_open_candle_excluded_and_duplicate_gap_reported(self):
         rows = series(30)
         rows.append([int(NOW.timestamp() * 1000) - HOUR // 2, "1", "1", "1", "1", "1"])
@@ -158,6 +247,12 @@ class ClientAndOrchestrationTests(unittest.TestCase):
             self.assertEqual(payload["selection"]["selected"], 2)
             self.assertIn("lecture seule", output.getvalue())
             self.assertEqual(client.return_value.get_candles.call_count, 2)
+            self.assertTrue(
+                all(
+                    call.kwargs["limit"] == 1440
+                    for call in client.return_value.get_candles.call_args_list
+                )
+            )
 
 
 if __name__ == "__main__":

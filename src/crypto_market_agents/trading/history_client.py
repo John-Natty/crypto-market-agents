@@ -19,7 +19,7 @@ class BitvavoCandleClient:
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self.timeout = timeout
 
-    def get_candles(self, market, *, interval="1h", limit=720):
+    def get_candles(self, market, *, interval="1h", limit=1440):
         if interval not in {"1h", "4h", "1d"}:
             raise ValueError("Intervalle pris en charge: 1h, 4h, 1d.")
         if isinstance(limit, bool) or not 1 <= limit <= 1440:
@@ -39,8 +39,10 @@ class BitvavoCandleClient:
                     raise CandleClientError("Réponse candles invalide.")
                 return payload
         except HTTPError as exc:
-            if exc.code == 429:
+            status_code = exc.code
+            exc.close()
+            if status_code == 429:
                 raise CandleClientError("Limite API Bitvavo (HTTP 429).") from None
-            raise CandleClientError(f"Candles indisponibles (HTTP {exc.code}).") from None
+            raise CandleClientError(f"Candles indisponibles (HTTP {status_code}).") from None
         except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise CandleClientError(f"Candles indisponibles ({type(exc).__name__}).") from None

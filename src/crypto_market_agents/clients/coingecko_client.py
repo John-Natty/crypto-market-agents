@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -114,6 +115,17 @@ class CoinGeckoClient:
             timeout_seconds=int(timeout or "20"),
         )
 
+    @classmethod
+    def from_free_public_api(cls) -> CoinGeckoClient:
+        """Create an unauthenticated client pinned to CoinGecko's public API."""
+
+        timeout = os.getenv("COINGECKO_TIMEOUT") or os.getenv("REQUEST_TIMEOUT_SECONDS")
+        return cls(
+            base_url="https://api.coingecko.com/api/v3",
+            api_key=None,
+            timeout_seconds=int(timeout or "20"),
+        )
+
     def ping(self) -> dict[str, Any]:
         """Check CoinGecko API availability."""
 
@@ -194,6 +206,58 @@ class CoinGeckoClient:
 
         return payload
 
+    def get_coin_list(self, *, include_platform: bool = True) -> list[dict[str, Any]]:
+        """Fetch CoinGecko IDs; symbols are discovery hints, never identity proof."""
+
+        payload = self._request_json(
+            "coins/list", {"include_platform": _bool_param(include_platform)}
+        )
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise CoinGeckoResponseError("CoinGecko coin list response must contain objects.")
+        return payload
+
+    def get_coin(self, coin_id: str, *, market_data: bool = True) -> dict[str, Any]:
+        """Fetch metadata and optional market data for one exact CoinGecko ID."""
+
+        clean_id = _coin_id(coin_id)
+        payload = self._request_json(
+            f"coins/{clean_id}",
+            {
+                "localization": "false",
+                "tickers": "false",
+                "market_data": _bool_param(market_data),
+                "community_data": "false",
+                "developer_data": "false",
+            },
+        )
+        if not isinstance(payload, dict) or not payload:
+            raise CoinGeckoResponseError("CoinGecko coin response must be a non-empty object.")
+        if payload.get("id") != clean_id:
+            raise CoinGeckoResponseError("CoinGecko returned a different coin ID.")
+        return payload
+
+    def get_coin_tickers(
+        self, coin_id: str, *, exchange_ids: str = "bitvavo", page: int = 1
+    ) -> dict[str, Any]:
+        """Fetch one bounded page of exchange tickers for an exact provider ID."""
+        clean_id = _coin_id(coin_id)
+        clean_exchange = _required_text(exchange_ids, "exchange_ids")
+        selected_page = _validate_positive_int(page, "page")
+        payload = self._request_json(
+            f"coins/{clean_id}/tickers",
+            {
+                "exchange_ids": clean_exchange,
+                "page": str(selected_page),
+                "order": "trust_score_desc",
+                "depth": "false",
+            },
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("tickers"), list):
+            raise CoinGeckoResponseError("CoinGecko tickers response must contain a ticker list.")
+        if not all(isinstance(item, dict) for item in payload["tickers"]):
+            raise CoinGeckoResponseError("CoinGecko tickers response must contain objects.")
+        return payload
+
     def _request_json(
         self,
         endpoint: str,
@@ -216,11 +280,14 @@ class CoinGeckoClient:
             status_code = response.status_code
             body = response.body
         except HTTPError as exc:
+            body = redact_text(_read_text(exc), secrets=(self.api_key,))
+            status_code = exc.code
+            exc.close()
             raise CoinGeckoAPIError(
                 endpoint=redact_text(endpoint, secrets=(self.api_key,)),
-                status_code=exc.code,
-                body=redact_text(_read_text(exc), secrets=(self.api_key,)),
-            ) from exc
+                status_code=status_code,
+                body=body,
+            ) from None
         except (TimeoutError, socket.timeout) as exc:
             raise CoinGeckoTimeoutError(f"CoinGecko request to {endpoint} timed out.") from exc
         except URLError as exc:
@@ -322,6 +389,13 @@ def _required_text(value: str, field_name: str) -> str:
     if not cleaned:
         raise ValueError(f"{field_name} cannot be empty.")
 
+    return cleaned
+
+
+def _coin_id(value: str) -> str:
+    cleaned = _required_text(value, "coin_id")
+    if len(cleaned) > 128 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", cleaned):
+        raise ValueError("coin_id contains unsupported path characters.")
     return cleaned
 
 

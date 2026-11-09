@@ -74,9 +74,11 @@ class BitvavoScanner:
                     raise ValueError("réponse Bitvavo trop volumineuse")
                 return json.loads(raw)
         except HTTPError as exc:
-            if exc.code == 429:
+            status_code = exc.code
+            exc.close()
+            if status_code == 429:
                 raise RuntimeError("Limite API Bitvavo (HTTP 429); réessayer plus tard.") from None
-            raise RuntimeError(f"API Bitvavo indisponible (HTTP {exc.code}).") from None
+            raise RuntimeError(f"API Bitvavo indisponible (HTTP {status_code}).") from None
         except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"API Bitvavo indisponible ({type(exc).__name__}).") from None
 

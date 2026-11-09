@@ -12,7 +12,7 @@ class DeepMarketAnalyzer:
         self.candle_client = candle_client
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
 
-    def analyze(self, scan_result, *, count=5, interval="1h", limit=720):
+    def analyze(self, scan_result, *, count=5, interval="1h", limit=1440):
         if isinstance(count, bool) or count < 1:
             raise ValueError("Le nombre de candidats doit être positif.")
         selected = scan_result.get("candidates", [])[:count]
@@ -43,11 +43,16 @@ class DeepMarketAnalyzer:
             }
             if scan_age_error:
                 item["data_quality"] = {"sufficient": False, "scan_error": scan_age_error}
+                item["analysis_quality"] = {"status": "unavailable", "reason": scan_age_error}
                 item["reasons"] = [scan_age_error]
                 output.append(item)
                 continue
             if not isinstance(market, str) or not market.endswith("-EUR"):
                 item["data_quality"] = {"sufficient": False, "error": "marché EUR invalide"}
+                item["analysis_quality"] = {
+                    "status": "unavailable",
+                    "reason": "marché absent ou non EUR dans le fichier de scan",
+                }
                 item["reasons"] = ["marché absent ou non EUR dans le fichier de scan"]
                 output.append(item)
                 continue
@@ -67,36 +72,75 @@ class DeepMarketAnalyzer:
                     }
                     for c in candles
                 ]
-                item["data_quality"] = quality
-                item["data_quality"]["sufficient"] = bool(
-                    item["data_sufficiency"]["sufficient"]
-                    and quality["fresh"]
-                    and not quality["gaps"]
-                    and not quality["invalid_rows"]
+                unavailable_metrics = [
+                    name
+                    for name, status in item.get("metric_quality", {}).items()
+                    if not status["available"] or not status["freshness"]["fresh"]
+                ]
+                analysis_status = (
+                    "partial"
+                    if unavailable_metrics
+                    or quality["invalid_data"]
+                    or quality["gaps"]
+                    or not quality["fresh"]
+                    else "complete"
                 )
-                if not item["data_quality"]["sufficient"]:
+                item["analysis_quality"] = {
+                    "status": analysis_status,
+                    "available_metrics": len(item.get("metric_quality", {}))
+                    - len(unavailable_metrics),
+                    "unavailable_metrics": unavailable_metrics,
+                    "invalid_data": quality["invalid_data"],
+                    "observed_gaps": quality["gaps"],
+                    "fresh": quality["fresh"],
+                }
+                item["data_quality"] = {
+                    "received": quality["received"],
+                    "valid": quality["valid"],
+                    "closed": quality["closed"],
+                    "open_excluded": quality["open_excluded"],
+                    "duplicates_removed": quality["duplicates_removed"],
+                    "invalid_data": quality["invalid_data"],
+                    "invalid_rows": quality["invalid_data"],
+                    "normalization_notes": quality["normalization_notes"],
+                    "gaps": quality["gaps"],
+                    "latest_closed_at": quality["latest_closed_at"],
+                    "latest_age_seconds": quality["latest_age_seconds"],
+                    "fresh": quality["fresh"],
+                }
+                if analysis_status == "partial":
                     item["disposition"] = (
-                        "écarter pour l'instant: qualité ou quantité de données insuffisante"
+                        "analyse partielle: disponibilité évaluée par métrique et fenêtre"
                     )
-                if not quality["fresh"]:
-                    item["reasons"].append("données trop anciennes ou aucune bougie clôturée")
-                    item["disposition"] = (
-                        "écarter pour l'instant: données historiques périmées ou absentes"
+                else:
+                    item["disposition"] = "analyse complète pour les métriques calculées"
+                if unavailable_metrics:
+                    item["reasons"].append(
+                        "métriques indisponibles ou périmées: " + ", ".join(unavailable_metrics)
                     )
+                if quality["invalid_data"]:
+                    item["reasons"].extend(quality["invalid_data"])
                 if quality["gaps"]:
-                    item["reasons"].append("historique avec trous temporels")
-                    item["disposition"] = "écarter pour l'instant: série temporelle incomplète"
-                if quality["invalid_rows"]:
-                    item["reasons"].extend(quality["invalid_rows"])
+                    item["reasons"].append(
+                        f"{len(quality['gaps'])} lacune(s) observée(s), cause inconnue; "
+                        "seules les fenêtres qui les traversent sont indisponibles"
+                    )
+                item["reasons"].extend(quality["normalization_notes"])
             except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
                 item["data_quality"] = {
-                    "sufficient": False,
+                    "invalid_data": [],
+                    "observed_gaps": [],
                     "error": f"{type(exc).__name__}: {exc}",
+                }
+                item["analysis_quality"] = {
+                    "status": "unavailable",
+                    "reason": f"{type(exc).__name__}: {exc}",
                 }
                 item["reasons"] = ["analyse indisponible pour ce candidat"]
             output.append(item)
         return {
             "generated_at": now.isoformat(),
+            "analysis_version": "metric-window-quality.v1",
             "scan_collected_at": generated_at,
             "source": "Bitvavo public candles",
             "sources": [
@@ -113,5 +157,7 @@ class DeepMarketAnalyzer:
             "limitations": [
                 "Observations historiques descriptives; aucune probabilité ni cible de prix.",
                 "Volume en actif de base; il ne mesure pas la profondeur disponible.",
+                "Les trous observés peuvent correspondre à des intervalles sans transaction; leur cause n'est pas déterminable à partir des seules bougies.",
+                "La disponibilité est évaluée par métrique et fenêtre; une mesure disponible ne rend pas le jeu de données complet.",
             ],
         }

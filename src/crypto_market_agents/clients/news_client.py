@@ -186,11 +186,14 @@ class NewsClient:
             status_code = response.status_code
             body = response.body
         except HTTPError as exc:
+            body = redact_text(_read_text(exc), secrets=(self.api_key,))
+            status_code = exc.code
+            exc.close()
             raise NewsAPIHTTPError(
                 endpoint=redact_text(endpoint, secrets=(self.api_key,)),
-                status_code=exc.code,
-                body=redact_text(_read_text(exc), secrets=(self.api_key,)),
-            ) from exc
+                status_code=status_code,
+                body=body,
+            ) from None
         except (TimeoutError, socket.timeout) as exc:
             raise NewsTimeoutError(f"News API request to {endpoint} timed out.") from exc
         except URLError as exc:
