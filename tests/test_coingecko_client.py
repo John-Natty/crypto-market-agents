@@ -42,6 +42,19 @@ class CoinGeckoClientTests(unittest.TestCase):
 
         self.assertEqual(payload, {"gecko_says": "ok"})
 
+    def test_coin_tickers_filters_verified_exchange_with_bounded_page(self):
+        calls = []
+        client = CoinGeckoClient(
+            opener=self.make_opener(b'{"tickers":[]}', calls),
+            http_settings=self.no_retry_settings(),
+        )
+        self.assertEqual(client.get_coin_tickers("asset-id"), {"tickers": []})
+        query = parse_qs(urlparse(calls[0].full_url).query)
+        self.assertEqual(urlparse(calls[0].full_url).path, "/api/v3/coins/asset-id/tickers")
+        self.assertEqual(query["exchange_ids"], ["bitvavo"])
+        self.assertEqual(query["page"], ["1"])
+        self.assertEqual(query["order"], ["trust_score_desc"])
+
     def test_simple_prices_uses_demo_header_and_query_params(self):
         calls = []
         client = CoinGeckoClient(
@@ -72,6 +85,14 @@ class CoinGeckoClientTests(unittest.TestCase):
         headers = {key.lower(): value for key, value in calls[0].header_items()}
         self.assertEqual(headers["x-cg-pro-api-key"], "pro-key")
 
+    def test_free_public_factory_never_uses_configured_api_key(self):
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"COINGECKO_API_KEY": "paid-key"}):
+            client = CoinGeckoClient.from_free_public_api()
+        self.assertEqual(client.base_url, "https://api.coingecko.com/api/v3")
+        self.assertIsNone(client.api_key)
+
     def test_pro_header_requires_exact_hostname(self):
         calls = []
         client = CoinGeckoClient(
@@ -100,6 +121,33 @@ class CoinGeckoClientTests(unittest.TestCase):
         self.assertEqual(len(payload), 2)
         self.assertEqual(query["ids"], ["bitcoin,ethereum"])
         self.assertEqual(query["price_change_percentage"], ["1h,24h,7d"])
+
+    def test_coin_list_and_exact_coin_detail_endpoints(self):
+        calls = []
+        responses = [
+            b'[{"id":"example-coin","symbol":"ex","name":"Example","platforms":{}}]',
+            b'{"id":"example-coin","market_data":{}}',
+        ]
+
+        def opener(request, timeout):
+            calls.append(request)
+            return FakeResponse(responses[len(calls) - 1])
+
+        client = CoinGeckoClient(opener=opener)
+        self.assertEqual(client.get_coin_list()[0]["id"], "example-coin")
+        self.assertEqual(client.get_coin("example-coin")["id"], "example-coin")
+        self.assertIn("coins/list?include_platform=true", calls[0].full_url)
+        self.assertIn("coins/example-coin?", calls[1].full_url)
+
+    def test_coin_detail_rejects_wrong_returned_id(self):
+        client = CoinGeckoClient(opener=self.make_opener(b'{"id":"other"}'))
+        with self.assertRaises(Exception):
+            client.get_coin("expected")
+
+    def test_coin_provider_id_cannot_inject_path_segments(self):
+        client = CoinGeckoClient(opener=self.make_opener(b'{"tickers":[]}'))
+        with self.assertRaises(ValueError):
+            client.get_coin_tickers("../unexpected")
 
     def test_non_200_response_raises_api_error(self):
         client = CoinGeckoClient(

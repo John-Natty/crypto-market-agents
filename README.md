@@ -23,6 +23,11 @@ necessaire et aucun ordre reel n'est envoye.
 Guide complet, limites, reprise et commandes : [Paper trading](docs/PAPER_TRADING.md).
 `init` refuse d'ecraser un etat existant; reutiliser `run` pour continuer.
 
+La [politique de recherche et de décision de l’IA](docs/AI_RESEARCH_AND_DECISION_POLICY.md)
+formalise les preuves attendues, la thèse préalable, l’abstention, les baisses,
+les budgets de recherche et les capacités qui restent à construire. C’est une
+politique documentaire visée, pas une fonction déjà appliquée par le moteur.
+
 ## Objectif Du Projet
 
 Crypto Market Agents combine plusieurs sources de donnees pour produire une vue lisible du marche crypto :

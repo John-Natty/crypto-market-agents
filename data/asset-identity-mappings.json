@@ -1,0 +1,22 @@
+{
+  "RSR-EUR": {
+    "coingecko_id": "reserve-rights-token",
+    "network": "ethereum",
+    "contract_address": "0x320623b8e4ff03373931769a31fc52a4e78b5d70"
+  },
+  "O-EUR": {
+    "coingecko_id": "o1-exchange",
+    "network": "base",
+    "contract_address": "0x182fa643e5f29d5eca75e7b9cf9336a3fe4620b2"
+  },
+  "HMSTR-EUR": {
+    "coingecko_id": "hamster-kombat",
+    "network": "the-open-network",
+    "contract_address": "EQAJ8uWd7EBqsmpSWaRdf_I-8R8-XHwh3gsNKhy-UrdrPcUo"
+  },
+  "PEPE-EUR": {
+    "coingecko_id": "pepe",
+    "network": "ethereum",
+    "contract_address": "0x6982508145454ce325ddbe47a25d4ec3d2311933"
+  }
+}
