@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import sys
 import tempfile
@@ -49,6 +50,75 @@ def scan(score=80):
             },
         ],
         "rejected": [],
+    }
+
+
+def catalog_market(
+    market,
+    *,
+    collected_at="2026-11-09T10:00:00+00:00",
+    volume="1",
+    quote_volume="10",
+):
+    base = market.split("-")[0]
+    values = {
+        "base_asset": (base, "asset identifier"),
+        "quote_asset": ("EUR", "asset identifier"),
+        "market_status": ("trading", "status"),
+        "last": ("10", "EUR per base asset"),
+        "open_24h": ("11", "EUR per base asset"),
+        "price_change_24h_pct": ("-9.0909", "% over previous 24h"),
+        "volume_base_24h": (volume, base),
+        "volume_quote_24h": (quote_volume, "EUR"),
+        "bid": ("9", "EUR per base asset"),
+        "ask": ("11", "EUR per base asset"),
+        "spread_pct": ("20", "%"),
+        "min_order_base": ("1", base),
+        "min_order_quote": ("5", "EUR"),
+    }
+    return {
+        "market": market,
+        "base_asset": base,
+        "quote_asset": "EUR",
+        "status": "trading",
+        "collected_at": collected_at,
+        "source_at": "2026-11-09T09:59:00+00:00",
+        "observations": {
+            key: {
+                "value": value,
+                "unit": unit,
+                "availability": "available",
+                "reason": None,
+                "collected_at": collected_at,
+                "source_at": "2026-11-09T09:59:00+00:00",
+                "source_timestamp_available": True,
+            }
+            for key, (value, unit) in values.items()
+        },
+    }
+
+
+def catalog_snapshot(markets):
+    rows = []
+    for entry in markets:
+        market, volume, *quote_volume = entry
+        rows.append(
+            catalog_market(
+                market,
+                volume=volume,
+                quote_volume=quote_volume[0] if quote_volume else "10",
+            )
+        )
+    rows.sort(key=lambda row: row["market"])
+    return {
+        "source": "Bitvavo public API",
+        "quote_currency": "EUR",
+        "collected_at": "2026-11-09T10:00:00+00:00",
+        "ordering": "market identifier ascending; stable pagination only, no ranking",
+        "page_size": 1,
+        "total_markets": len(rows),
+        "total_pages": len(rows),
+        "pages": [{"page": index, "items": [row]} for index, row in enumerate(rows)],
     }
 
 
@@ -216,7 +286,9 @@ def call(name, args):
                         "fact_refs",
                         "missing_refs",
                         "required_missing_refs",
+                        "reason",
                     )
+                    if key in candidate or key != "reason"
                 }
                 for candidate in args.get("candidates", [])
             ]
@@ -241,6 +313,7 @@ class AutonomousResearchTests(unittest.TestCase):
         model,
         *,
         scan_data=None,
+        discover_data=None,
         limits=None,
         clock=None,
         analyze_fn=None,
@@ -253,6 +326,7 @@ class AutonomousResearchTests(unittest.TestCase):
             model="qwen3:8b",
             ollama=model,
             scan=lambda remaining: scan_data or scan(),
+            discover=(lambda remaining: discover_data) if discover_data is not None else None,
             analyze=analyze_fn
             or (lambda market, candidate, scan_result, remaining: history(market)),
             fundamentals=fundamentals_fn
@@ -300,6 +374,121 @@ class AutonomousResearchTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "completed")
         self.assertEqual(selected, ["analyze_candidate", "get_fundamentals"])
+
+    def test_model_selects_unranked_market_from_a_page_the_old_scanner_rejected(self):
+        fake = FakeOllama(
+            [
+                call(
+                    "list_market_page",
+                    {"page": 1, "reason": "Examiner ce marché hors du premier segment."},
+                ),
+                call(
+                    "analyze_candidate",
+                    {
+                        "market": "YYY-EUR",
+                        "reason": "Comparer son historique malgré son faible volume.",
+                    },
+                ),
+                call(
+                    "finish_research",
+                    {
+                        "candidates": [
+                            {
+                                "market": "YYY-EUR",
+                                "fact_refs": [
+                                    "market_catalog:YYY-EUR:volume_quote_24h",
+                                    "history:YYY-EUR:returns_pct.24h",
+                                ],
+                                "missing_refs": [],
+                                "required_missing_refs": [],
+                                "reason": "Comparer les preuves observées pour ce marché.",
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        snapshot = catalog_snapshot(
+            [("AAA-EUR", "500000", "500000"), ("YYY-EUR", "1", "10"), ("ZZZ-EUR", "2", "20")]
+        )
+        runner, _ = self.make_runner(fake, discover_data=snapshot)
+        result = runner.run("Comparer des marchés sans présélection déterministe.")
+
+        self.assertEqual(result["schema_version"], "autonomous-research.v7")
+        self.assertEqual(result["scan"]["status"], "not_run")
+        self.assertEqual(result["market_universe"]["pages_consulted"], [0, 1])
+        self.assertEqual(result["market_universe"]["pages_not_consulted"], [2])
+        self.assertEqual(result["market_universe"]["coverage_status"], "partial_pages_unconsulted")
+        self.assertIn("market_catalog:YYY-EUR:volume_quote_24h", result["fact_ledger"])
+        yyy_observations = catalog_market("YYY-EUR", volume="1", quote_volume="10")["observations"]
+        self.assertLess(Decimal(yyy_observations["volume_quote_24h"]["value"]), Decimal("100000"))
+        self.assertGreater(Decimal(yyy_observations["spread_pct"]["value"]), Decimal("1"))
+        self.assertEqual(result["candidates"][1]["market"], "YYY-EUR")
+        self.assertEqual(
+            result["candidates"][1]["selection_reasons"][0]["reason"],
+            "Comparer son historique malgré son faible volume.",
+        )
+        self.assertIsNone(result["candidates"][1]["facts"][0]["value"].get("score"))
+        first_payload = __import__("json").loads(fake.requests[0][0][1]["content"])
+        catalog_tools = [
+            tool for tool in fake.requests[0][1] if tool["function"]["name"] == "list_market_page"
+        ]
+        self.assertEqual(
+            catalog_tools[0]["function"]["parameters"]["properties"]["page"]["enum"], [0, 1, 2]
+        )
+        self.assertEqual(first_payload["market_universe"]["pages_not_consulted"], [1, 2])
+        self.assertEqual(first_payload["market_catalog_pages"][0]["items"][0]["market"], "AAA-EUR")
+        self.assertNotIn("score", first_payload["market_catalog_pages"][0]["items"][0])
+
+    def test_market_page_budget_exhaustion_keeps_coverage_partial_without_decision(self):
+        fake = FakeOllama(
+            [
+                call(
+                    "list_market_page",
+                    {"page": 1, "reason": "Examiner la page suivante."},
+                )
+            ]
+        )
+        limits = ResearchLimits(max_tool_calls=1, total_timeout_seconds=60)
+        runner, _ = self.make_runner(
+            fake,
+            discover_data=catalog_snapshot(
+                [("AAA-EUR", "100"), ("BBB-EUR", "90"), ("CCC-EUR", "80")]
+            ),
+            limits=limits,
+        )
+        result = runner.run("Explorer quelques marchés.")
+        self.assertEqual(result["stop_reason"], "tool_call_budget_exhausted")
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["market_universe"]["pages_not_consulted"], [2])
+        self.assertEqual(result["conclusion"]["classification"], None)
+        self.assertEqual(len(fake.requests), 1)
+
+    def test_discovery_rejects_unseen_market_reference_without_forced_conclusion(self):
+        fake = FakeOllama(
+            [
+                call(
+                    "finish_research",
+                    {
+                        "candidates": [
+                            {
+                                "market": "AAA-EUR",
+                                "fact_refs": ["market_catalog:BBB-EUR:bid"],
+                                "missing_refs": [],
+                                "required_missing_refs": [],
+                                "reason": "Vérifier la référence de cotation.",
+                            }
+                        ]
+                    },
+                )
+            ]
+        )
+        runner, _ = self.make_runner(fake, discover_data=catalog_snapshot([("AAA-EUR", "1")]))
+        result = runner.run("Examiner un marché.")
+        errors = [event["error"] for event in result["events"] if event.get("error")]
+        self.assertIn("fact_reference_unavailable_or_wrong_market", errors)
+        self.assertIsNone(result["conclusion"].get("classification"))
+        self.assertFalse(result["financial_action_executed"])
 
     def test_model_can_choose_general_news_and_conclusion_labels_reported_claims(self):
         news_calls = []
@@ -1719,12 +1908,55 @@ class AutonomousResearchTests(unittest.TestCase):
             "source_at": "2026-11-09T09:59:00+00:00",
         }
 
-        class Scanner:
+        class Discovery:
             def __init__(self, **kwargs):
                 pass
 
-            def scan(self):
-                return {"collected_at": candidate["collected_at"], "candidates": [candidate]}
+            def snapshot(self):
+                observations = {
+                    key: {
+                        "value": value,
+                        "unit": unit,
+                        "availability": "available",
+                        "reason": None,
+                        "collected_at": candidate["collected_at"],
+                        "source_at": candidate["source_at"],
+                    }
+                    for key, value, unit in (
+                        ("base_asset", "AAA", "asset identifier"),
+                        ("quote_asset", "EUR", "asset identifier"),
+                        ("market_status", "trading", "status"),
+                        ("last", "100", "EUR per base asset"),
+                        ("open_24h", "99", "EUR per base asset"),
+                        ("price_change_24h_pct", "1", "% over previous 24h"),
+                        ("volume_base_24h", "10", "AAA"),
+                        ("volume_quote_24h", "1000", "EUR"),
+                        ("bid", "99", "EUR per base asset"),
+                        ("ask", "100", "EUR per base asset"),
+                        ("spread_pct", "1.005", "%"),
+                        ("min_order_base", "0.1", "AAA"),
+                        ("min_order_quote", "5", "EUR"),
+                    )
+                }
+                row = {
+                    "market": candidate["market"],
+                    "base_asset": candidate["base_asset"],
+                    "quote_asset": candidate["quote_asset"],
+                    "status": "trading",
+                    "collected_at": candidate["collected_at"],
+                    "source_at": candidate["source_at"],
+                    "observations": observations,
+                }
+                return {
+                    "source": "Bitvavo public API",
+                    "quote_currency": "EUR",
+                    "collected_at": candidate["collected_at"],
+                    "ordering": "market identifier ascending; stable pagination only, no ranking",
+                    "page_size": 1,
+                    "total_markets": 1,
+                    "total_pages": 1,
+                    "pages": [{"page": 0, "items": [row]}],
+                }
 
         class Ollama:
             timeout = 90
@@ -1759,7 +1991,10 @@ class AutonomousResearchTests(unittest.TestCase):
                         "num_ctx": 8192,
                     }
                 if self.turn == 1:
-                    requested = call("get_fundamentals", {"market": "AAA-EUR"})
+                    requested = call(
+                        "get_fundamentals",
+                        {"market": "AAA-EUR", "reason": "Vérifier son identité."},
+                    )
                 else:
                     requested = call(
                         "finish_research",
@@ -1769,6 +2004,7 @@ class AutonomousResearchTests(unittest.TestCase):
                                     "market": "AAA-EUR",
                                     "fact_refs": ["fundamentals:AAA-EUR:identity_status"],
                                     "missing_refs": [],
+                                    "reason": "Vérifier le dossier factuel de ce marché.",
                                     "interpretation": "Identité vérifiée par le code.",
                                     "conclusion": "Dossier consulté.",
                                 }
@@ -1807,7 +2043,7 @@ class AutonomousResearchTests(unittest.TestCase):
             mapping_path.write_text("{}", encoding="utf-8")
             report_path = Path(temp_dir) / "research.json"
             with (
-                patch("crypto_market_agents.cli.BitvavoScanner", Scanner),
+                patch("crypto_market_agents.cli.BitvavoMarketDiscovery", Discovery),
                 patch("crypto_market_agents.cli.OllamaCandidateEvaluator", Ollama),
                 patch(
                     "crypto_market_agents.cli.BitvavoAssetClient.from_env", return_value=Client()

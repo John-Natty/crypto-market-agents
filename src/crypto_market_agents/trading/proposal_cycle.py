@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
 import hashlib
 import json
+from pathlib import Path
+import re
 import time
 from typing import Any
 import uuid
@@ -14,6 +16,9 @@ import uuid
 from .market import BitvavoMarketData
 from .models import Quote
 from .models import checked_market
+from .deep_analysis import DeepMarketAnalyzer
+from .evaluation import build_candidate_observations
+from .history_client import CandleClientError
 from .multi_asset import (
     MultiAssetOrder,
     MultiAssetPaperEngine,
@@ -22,21 +27,24 @@ from .multi_asset import (
     _quote_snapshot,
 )
 
-CYCLE_SCHEMA = "paper-proposal-cycle.v2"
+CYCLE_SCHEMA = "paper-proposal-cycle.v3"
 SIZING_POLICY = "paper-multiasset-risk-cap.v1"
 MAX_REPORT_BYTES = 20 * 1024 * 1024
 MAX_CONTEXT_BYTES = 100_000
 MAX_RESPONSE_BYTES = 40_000
-MAX_CYCLE_MARKETS = 5
+MAX_DISCOVERY_MARKETS = 5
+MAX_TRACKED_POSITIONS = 10
+MAX_CYCLE_MARKETS = MAX_DISCOVERY_MARKETS + MAX_TRACKED_POSITIONS
 MAX_NUM_PREDICT_PER_MARKET = 1200
 MAX_TOTAL_NUM_PREDICT = 8192
-MAX_QUOTE_MARKETS = 5
-MAX_CYCLE_SECONDS = 180
+MAX_QUOTE_MARKETS = MAX_CYCLE_MARKETS
+MAX_CYCLE_SECONDS = 400
 CONTEXT_MARGIN_TOKENS = 512
 MAX_REPORT_AGE_SECONDS = 24 * 60 * 60
 MAX_REVIEW_AGE_SECONDS = 24 * 60 * 60
 FACT_AGE_BY_SOURCE = {
     "bitvavo_scanner": 60 * 60,
+    "bitvavo_market_catalog": 60 * 60,
     "bitvavo_historical_analysis": 6 * 60 * 60,
     "coingecko": 7 * 24 * 60 * 60,
     "defillama": 7 * 24 * 60 * 60,
@@ -47,6 +55,302 @@ FACT_AGE_BY_SOURCE = {
 
 class ProposalCycleError(ValueError):
     """Invalid or unusable frozen cycle inputs."""
+
+
+def load_verified_entry_theses(reports_dir, portfolio):
+    """Find previously executed, hash-verified entry theses under one report root."""
+    root = Path(reports_dir).expanduser().resolve()
+    cycles_root = root / "automatic-cycles"
+    if cycles_root.is_symlink() or not cycles_root.is_dir() or cycles_root.resolve().parent != root:
+        return {}
+    latest_buys = {}
+    for event in portfolio.ledger:
+        if (
+            event.get("status") == "executed"
+            and event.get("action") == "buy"
+            and event.get("position_quantity_after", "0") != "0"
+        ):
+            latest_buys[event.get("platform", "") + "|" + event.get("market", "")] = event
+    requested = {}
+    for key, event in latest_buys.items():
+        match = re.fullmatch(r"proposal-cycle:([a-f0-9]{24}):(.+)", event.get("decision_id", ""))
+        if match and match.group(2) == event.get("market"):
+            requested[match.group(1)] = (key, event)
+    if not requested:
+        return {}
+    resolved = {}
+    try:
+        directories = list(cycles_root.iterdir())
+    except OSError:
+        return {}
+    for directory in directories:
+        if (
+            not re.fullmatch(r"[a-f0-9]{32}", directory.name)
+            or directory.is_symlink()
+            or not directory.is_dir()
+            or directory.resolve().parent != cycles_root.resolve()
+        ):
+            continue
+        try:
+            manifest_path = directory / "cycle.json"
+            manifest = _read_bounded_json(manifest_path, 2 * 1024 * 1024, directory)
+            if (
+                manifest.get("schema_version") != "automatic-paper-cycle.v1"
+                or manifest.get("cycle_id") != directory.name
+            ):
+                continue
+            stages = manifest.get("stages")
+            if not isinstance(stages, dict):
+                continue
+            proposal = _verified_cycle_artifact(directory, stages.get("proposal"), "proposal.json")
+            execution = _verified_cycle_artifact(
+                directory, stages.get("execution"), "execution.json"
+            )
+            if (
+                proposal is None
+                or execution is None
+                or execution.get("status") != "committed"
+                or not str(proposal.get("schema_version", "")).startswith("paper-proposal-cycle.")
+                or proposal.get("read_only") is not True
+                or proposal.get("financial_action_executed") is not False
+            ):
+                continue
+            proposal_cycle_id = proposal.get("cycle_id")
+            if proposal_cycle_id not in requested:
+                continue
+            key, event = requested[proposal_cycle_id]
+            market = event.get("market")
+            executed = any(
+                isinstance(row, dict)
+                and row.get("decision_id") == event.get("decision_id")
+                and row.get("market") == market
+                and row.get("action") == "buy"
+                and row.get("status") == "executed"
+                for row in execution.get("transactions", [])
+            )
+            thesis = next(
+                (
+                    row
+                    for row in proposal.get("proposals", [])
+                    if isinstance(row, dict)
+                    and row.get("market") == market
+                    and row.get("action") == "buy"
+                    and row.get("status") == "accepted"
+                ),
+                None,
+            )
+            if not executed or thesis is None:
+                continue
+            resolved[key] = {
+                "status": "verified",
+                "reference": f"historical-entry-thesis:{proposal_cycle_id}:{market}",
+                "source_cycle_id": proposal_cycle_id,
+                "created_at": proposal.get("generated_at"),
+                "rationale": _bounded_entry_text(thesis.get("rationale"), 300),
+                "references": _bounded_entry_references(thesis.get("references")),
+                "horizon": _bounded_entry_text(thesis.get("horizon"), 100),
+                "invalidation_conditions": [
+                    _bounded_entry_text(value, 150)
+                    for value in thesis.get("invalidation_conditions", [])[:3]
+                    if isinstance(value, str)
+                ],
+            }
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+    return resolved
+
+
+def load_recent_position_history(reports_dir, portfolio, *, now=None):
+    """Load fresh candle facts only from hash-verified automatic-cycle artifacts."""
+    timestamp = now or datetime.now(timezone.utc)
+    root = Path(reports_dir).expanduser().resolve()
+    cycles_root = root / "automatic-cycles"
+    if cycles_root.is_symlink() or not cycles_root.is_dir() or cycles_root.resolve().parent != root:
+        return {}
+    markets = {
+        position.market for position in portfolio.positions.values() if position.quantity > 0
+    }
+    gathered = {}
+    try:
+        directories = sorted(
+            cycles_root.iterdir(),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        return {}
+    for directory in directories:
+        if (
+            not re.fullmatch(r"[a-f0-9]{32}", directory.name)
+            or directory.is_symlink()
+            or not directory.is_dir()
+            or directory.resolve().parent != cycles_root.resolve()
+        ):
+            continue
+        try:
+            manifest = _read_bounded_json(directory / "cycle.json", 2 * 1024 * 1024, directory)
+            if manifest.get("schema_version") != "automatic-paper-cycle.v1":
+                continue
+            record = (manifest.get("stages") or {}).get("research")
+            if not isinstance(record, dict) or record.get("status") != "completed":
+                continue
+            report = _verified_cycle_artifact(directory, record, "research.json")
+            facts = report.get("fact_ledger") if isinstance(report, dict) else None
+            if not isinstance(facts, dict):
+                continue
+            for reference, fact in facts.items():
+                if (
+                    not isinstance(fact, dict)
+                    or fact.get("source") != "bitvavo_historical_analysis"
+                    or fact.get("market") not in markets
+                    or reference in gathered
+                    or _fact_freshness(fact, timestamp) != "fresh"
+                ):
+                    continue
+                gathered[reference] = deepcopy(fact)
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+    return gathered
+
+
+def collect_position_history_report(portfolio, history_client, *, reports_dir, now=None, limit=10):
+    """Build a read-only history artifact for held positions, without scanner discovery."""
+    timestamp = now or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ProposalCycleError("history_report_timestamp_must_be_timezone_aware")
+    positions = sorted(
+        (position for position in portfolio.positions.values() if position.quantity > 0),
+        key=lambda position: position.key,
+    )
+    facts = load_recent_position_history(reports_dir, portfolio, now=timestamp)
+    missing = {}
+    rows = {}
+    requests = 0
+    selected = positions[:limit]
+    for position in selected:
+        market_facts = {
+            ref: value
+            for ref, value in facts.items()
+            if isinstance(value, dict) and value.get("market") == position.market
+        }
+        if _has_fresh_position_history(market_facts, position.market, timestamp):
+            rows[position.market] = {
+                "status": "reused_fresh_analysis",
+                "source": "verified_prior_cycle_report",
+                "network_requests": 0,
+            }
+            continue
+        try:
+            analysis, new_facts, new_missing = _collect_position_history(
+                history_client,
+                position.market,
+                timestamp,
+            )
+            facts.update(new_facts)
+            missing.update(new_missing)
+            requests += 1
+            complete = _has_fresh_position_history(
+                {
+                    ref: fact
+                    for ref, fact in facts.items()
+                    if isinstance(fact, dict) and fact.get("market") == position.market
+                },
+                position.market,
+                timestamp,
+            )
+            rows[position.market] = {
+                "status": "collected" if complete else "incomplete",
+                "source": "bitvavo_historical_analysis",
+                "analysis_status": analysis.get("analysis_quality", {}).get("status"),
+                "available_metric_count": len(new_facts),
+                "missing_metric_count": len(new_missing),
+                "reason": None
+                if complete
+                else analysis.get("analysis_quality", {}).get("reason")
+                or "required_historical_metrics_unavailable",
+                "network_requests": 1,
+            }
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+            rows[position.market] = {
+                "status": "incomplete",
+                "source": "bitvavo_historical_analysis",
+                "reason": f"historical_collection_failed:{type(exc).__name__}",
+                "network_requests": 1,
+            }
+            requests += 1
+    for position in positions[limit:]:
+        rows[position.market] = {
+            "status": "not_evaluated",
+            "reason": "position_history_budget_exhausted",
+            "network_requests": 0,
+        }
+    return {
+        "schema_version": "autonomous-research.v6",
+        "generated_at": timestamp.astimezone(timezone.utc).isoformat(),
+        "status": "no_open_positions"
+        if not positions
+        else "completed"
+        if all(row.get("status") in {"collected", "reused_fresh_analysis"} for row in rows.values())
+        else "partial",
+        "research_status": "position_tracking_only",
+        "cycle_mode": "position_tracking_only",
+        "read_only": True,
+        "financial_action_executed": False,
+        "scan": {"status": "not_run", "reason": "position_tracking_only"},
+        "conclusion": {"candidates": []},
+        "fact_ledger": facts,
+        "missing_ledger": missing,
+        "position_history": rows,
+        "budget": {
+            "max_positions": limit,
+            "selected_positions": len(selected),
+            "network_requests_used": requests,
+            "max_network_requests": limit,
+            "interval": "1h",
+            "candles_per_request": 1440,
+            "request_timeout_seconds": 8,
+        },
+        "limitations": [
+            "Aucun scanner, candidat de découverte, enrichissement fondamental ou revue de découverte n'a été exécuté.",
+            "Les historiques sont descriptifs; leur disponibilité ne prouve ni la thèse ni une action appropriée.",
+            "Une thèse d'entrée absente reste absente.",
+        ],
+    }
+
+
+def _read_bounded_json(path, maximum, parent):
+    if path.is_symlink() or path.resolve().parent != parent.resolve():
+        raise ValueError("cycle_artifact_path_invalid")
+    stat_result = path.stat()
+    if not path.is_file() or stat_result.st_size > maximum:
+        raise ValueError("cycle_artifact_size_invalid")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _verified_cycle_artifact(directory, record, filename):
+    if (
+        not isinstance(record, dict)
+        or record.get("artifact") != filename
+        or record.get("status") != "completed"
+        or not isinstance(record.get("sha256"), str)
+    ):
+        return None
+    payload = _read_bounded_json(directory / filename, MAX_REPORT_BYTES, directory)
+    # The on-disk canonical JSON is hashed exactly by automatic-paper-cycle.
+    raw_digest = hashlib.sha256((directory / filename).read_bytes()).hexdigest()
+    if record.get("sha256") != raw_digest:
+        return None
+    return payload
+
+
+def _bounded_entry_text(value, maximum):
+    return value[:maximum] if isinstance(value, str) else None
+
+
+def _bounded_entry_references(values):
+    if not isinstance(values, list):
+        return []
+    return [value for value in values[:5] if isinstance(value, str) and len(value) <= 200]
 
 
 def run_proposal_cycle(
@@ -61,11 +365,16 @@ def run_proposal_cycle(
     review_label: str,
     model: str,
     num_predict: int = 800,
-    total_num_predict: int = 4000,
+    tracking_num_predict: int = 384,
+    max_tracked_positions: int = MAX_TRACKED_POSITIONS,
+    total_num_predict: int = 8192,
+    entry_theses: dict[str, dict[str, Any]] | None = None,
     timeout_seconds: int = 60,
     num_ctx: int = 8192,
     now_provider=None,
     quote_client=None,
+    history_client=None,
+    position_tracking_only=False,
     monotonic=time.monotonic,
 ) -> dict[str, Any]:
     """Produce one proposal per market, then validate them on a shared dry-run copy."""
@@ -75,6 +384,7 @@ def run_proposal_cycle(
     cycle_id = uuid.uuid4().hex[:24]
     result = {
         "schema_version": CYCLE_SCHEMA,
+        "cycle_type": "position_tracking_only" if position_tracking_only else "full_discovery",
         "cycle_id": cycle_id,
         "generated_at": now.astimezone(timezone.utc).isoformat(),
         "status": "failed",
@@ -87,7 +397,9 @@ def run_proposal_cycle(
         "source_reports": {
             "research": {"path": research_label, "sha256": research_sha256},
             "review": {"path": review_label, "sha256": review_sha256},
-            "temporality": "frozen_reports; no research or review collection performed by this command",
+            "temporality": "position_tracking_only"
+            if position_tracking_only
+            else "frozen_reports; no research or review collection performed by this command",
         },
         "portfolio_snapshot": None,
         "model": model,
@@ -130,7 +442,12 @@ def run_proposal_cycle(
     try:
         if (
             not 128 <= num_predict <= MAX_NUM_PREDICT_PER_MARKET
-            or not num_predict <= total_num_predict <= MAX_TOTAL_NUM_PREDICT
+            or not 128 <= tracking_num_predict <= MAX_NUM_PREDICT_PER_MARKET
+            or type(max_tracked_positions) is not int
+            or not 1 <= max_tracked_positions <= MAX_TRACKED_POSITIONS
+            or total_num_predict
+            < tracking_num_predict * max_tracked_positions + num_predict * MAX_DISCOVERY_MARKETS
+            <= MAX_TOTAL_NUM_PREDICT
             or not 1 <= timeout_seconds <= 90
         ):
             raise ProposalCycleError("proposal_generation_budget_invalid")
@@ -152,12 +469,156 @@ def run_proposal_cycle(
             research_sha256,
             now,
         )
-        held_markets = {
-            position.market for position in portfolio.positions.values() if position.quantity > 0
+        research_source_status = research.get("status")
+        review_source_status = review.get("status")
+        position_tracking_only = (
+            position_tracking_only or research.get("cycle_mode") == "position_tracking_only"
+        )
+        if position_tracking_only:
+            result["cycle_type"] = "position_tracking_only"
+            research_source_status = "not_applicable"
+            review_source_status = "not_applicable"
+            result["source_reports"]["temporality"] = (
+                "position tracking only; discovery research and review were not run"
+            )
+        missing_ledger = research.get("missing_ledger")
+        if not isinstance(missing_ledger, dict):
+            missing_ledger = {}
+        open_positions = sorted(
+            (position for position in portfolio.positions.values() if position.quantity > 0),
+            key=lambda position: position.key,
+        )
+        tracked_positions = open_positions[:max_tracked_positions]
+        omitted_positions = open_positions[max_tracked_positions:]
+        tracked_markets = {position.market for position in tracked_positions}
+        all_held_markets = {position.market for position in open_positions}
+        discovery_markets = [market for market in candidates if market not in all_held_markets][
+            :MAX_DISCOVERY_MARKETS
+        ]
+        target_markets = sorted(tracked_markets) + discovery_markets
+        omitted_discovery = [
+            market
+            for market in candidates
+            if market not in all_held_markets and market not in discovery_markets
+        ]
+        omitted_model_markets = sorted(
+            {position.market for position in omitted_positions} | set(omitted_discovery)
+        )
+        tracking_theses = entry_theses or {}
+        history_collection = (
+            deepcopy(research.get("position_history", {})) if position_tracking_only else {}
+        )
+        if position_tracking_only and not open_positions:
+            result["position_tracking"] = {
+                "status": "no_open_positions",
+                "sources": {"research": research_source_status, "review": review_source_status},
+                "budget": {
+                    "max_positions": max_tracked_positions,
+                    "selected_positions": 0,
+                    "omitted_positions": 0,
+                    "reserved_tokens": 0,
+                    "generated_tokens": 0,
+                },
+                "positions": [],
+                "historical_analysis": {},
+            }
+            result["technical_status"] = "completed"
+            result["status"] = "completed"
+            result["model_response_status"] = "not_run"
+            result["plan_admissibility"] = "not_applicable"
+            result["decision_status"] = "no_open_positions"
+            result["cycle_duration_ms"] = int((monotonic() - started) * 1000)
+            return result
+        for position in () if position_tracking_only else tracked_positions:
+            if _has_fresh_position_history(facts, position.market, now):
+                history_collection[position.market] = {
+                    "status": "reused_fresh_analysis",
+                    "source": "research_fact_ledger",
+                    "network_requests": 0,
+                }
+                continue
+            if history_client is None:
+                history_collection[position.market] = {
+                    "status": "incomplete",
+                    "reason": "historical_client_not_configured",
+                    "network_requests": 0,
+                }
+                continue
+            try:
+                analysis, fact_rows, missing_rows = _collect_position_history(
+                    history_client,
+                    position.market,
+                    now,
+                )
+                facts.update(fact_rows)
+                missing_ledger.update(missing_rows)
+                history_collection[position.market] = {
+                    "status": "collected" if fact_rows else "incomplete",
+                    "source": "bitvavo_historical_analysis",
+                    "interval": "1h",
+                    "limit": 1440,
+                    "analysis_status": analysis.get("analysis_quality", {}).get("status"),
+                    "available_metric_count": len(fact_rows),
+                    "missing_metric_count": len(missing_rows),
+                    "reason": (
+                        None
+                        if fact_rows
+                        else analysis.get("analysis_quality", {}).get("reason")
+                        or "no_usable_historical_metrics"
+                    ),
+                    "network_requests": 1,
+                }
+            except CandleClientError as exc:
+                history_collection[position.market] = {
+                    "status": "incomplete",
+                    "reason": f"historical_collection_failed:{str(exc)[:160]}",
+                    "network_requests": 1,
+                }
+            except TimeoutError:
+                history_collection[position.market] = {
+                    "status": "incomplete",
+                    "reason": "historical_collection_timeout",
+                    "network_requests": 1,
+                }
+            except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+                history_collection[position.market] = {
+                    "status": "incomplete",
+                    "reason": f"historical_collection_failed:{type(exc).__name__}",
+                    "network_requests": 1,
+                }
+        result["position_tracking"] = {
+            "status": "pending" if open_positions else "no_open_positions",
+            "sources": {
+                "research": research_source_status,
+                "review": review_source_status,
+            },
+            "historical_analysis": history_collection,
+            "budget": {
+                "max_positions": max_tracked_positions,
+                "num_predict_per_call": tracking_num_predict,
+                "reserved_tokens": tracking_num_predict * len(tracked_markets),
+                "generated_tokens": 0,
+            },
+            "positions": [
+                {
+                    "position_key": position.key,
+                    "market": position.market,
+                    "status": "not_evaluated",
+                    "reason": "position_tracking_budget_exhausted",
+                    "entry_thesis_status": tracking_theses.get(position.key, {}).get(
+                        "status", "not_found"
+                    ),
+                }
+                for position in omitted_positions
+            ],
         }
-        all_markets = sorted(set(candidates) | held_markets)
-        target_markets = all_markets[:MAX_CYCLE_MARKETS]
-        omitted_model_markets = all_markets[MAX_CYCLE_MARKETS:]
+        result["discovery"] = {
+            "budget": {
+                "max_candidates": MAX_DISCOVERY_MARKETS,
+                "num_predict_per_call": num_predict,
+            },
+            "omitted_markets": omitted_discovery,
+        }
         client = quote_client or BitvavoMarketData(timeout=8)
         quote_reserve_seconds = MAX_QUOTE_MARKETS * 16
         model_outputs, model_errors, call_records = [], [], []
@@ -173,10 +634,16 @@ def run_proposal_cycle(
                 timeout_seconds,
                 int(available_model_seconds // remaining_calls) if remaining_calls else 0,
             )
+            is_position_target = market in tracked_markets
+            # Held markets consume the tracking allocation, even when current
+            # scanner evidence is also available for the same market.
+            is_discovery_target = market in discovery_markets
+            call_num_predict = num_predict if is_discovery_target else tracking_num_predict
             record = {
                 "market": market,
                 "status": "not_run",
-                "num_predict": num_predict,
+                "num_predict": call_num_predict,
+                "target_type": ("position_tracking" if is_position_target else "discovery"),
                 "timeout_seconds": call_timeout,
                 "prompt_estimate_tokens": None,
                 "prompt_eval_count": None,
@@ -188,7 +655,7 @@ def run_proposal_cycle(
                 "error": None,
             }
             call_started = None
-            if reserved_total + num_predict > total_num_predict:
+            if reserved_total + call_num_predict > total_num_predict:
                 record["error"] = "total_generation_budget_exhausted"
                 call_records.append(record)
                 all_calls_finished = False
@@ -200,7 +667,15 @@ def run_proposal_cycle(
                 continue
             try:
                 context, schema = _build_context(
-                    candidates, review_rows, facts, portfolio, now, market
+                    candidates,
+                    review_rows,
+                    facts,
+                    portfolio,
+                    now,
+                    market,
+                    tracking_theses,
+                    {position.key for position in tracked_positions},
+                    missing_ledger,
                 )
                 encoded = json.dumps(
                     {"messages": context, "format": schema},
@@ -211,15 +686,15 @@ def run_proposal_cycle(
                     raise ProposalCycleError("proposal_context_size_limit_exceeded")
                 prompt_estimate = (len(encoded) * 2 + 8) // 9
                 record["prompt_estimate_tokens"] = prompt_estimate
-                if prompt_estimate + num_predict + CONTEXT_MARGIN_TOKENS > num_ctx:
+                if prompt_estimate + call_num_predict + CONTEXT_MARGIN_TOKENS > num_ctx:
                     raise ProposalCycleError("proposal_context_budget_exceeded")
                 attempted_calls += 1
-                reserved_total += num_predict
+                reserved_total += call_num_predict
                 call_started = monotonic()
                 response = ollama.chat_with_tools(
                     context,
                     [],
-                    num_predict=num_predict,
+                    num_predict=call_num_predict,
                     timeout=call_timeout,
                     max_response_bytes=MAX_RESPONSE_BYTES,
                     format_schema=schema,
@@ -323,13 +798,18 @@ def run_proposal_cycle(
 
     # Quotes are fetched only after per-market responses have been parsed independently.
     quote_by_market: dict[str, Quote | None] = {}
+    eligible_model_rows = [row for row in model_outputs if not row.get("validation_errors")]
     required_markets = list(
         dict.fromkeys(
-            [row["market"] for row in model_outputs]
-            + sorted(
-                position.market
-                for position in portfolio.positions.values()
-                if position.quantity > 0
+            [
+                row["market"]
+                for row in eligible_model_rows
+                if row.get("action") in {"buy", "reduce", "close", "hold"}
+            ]
+            + (
+                sorted(position.market for position in open_positions)
+                if eligible_model_rows
+                else []
             )
         )
     )
@@ -449,6 +929,165 @@ def run_proposal_cycle(
         response_rows, candidates, review_rows, facts, portfolio, quote_by_market, valuation_at
     )
     result["proposals"] = evaluated
+    proposals_by_market = {row.get("market"): row for row in evaluated}
+    tracking_rows = {row["position_key"]: row for row in result["position_tracking"]["positions"]}
+    for position in tracked_positions:
+        proposal_row = proposals_by_market.get(position.market)
+        thesis = tracking_theses.get(position.key)
+        plan_status = proposal_row.get("status") if proposal_row else "not_evaluated"
+        reason = None
+        follow_status = "reviewed"
+        if proposal_row is None or plan_status == "not_evaluated":
+            follow_status = "incomplete"
+            reason = (
+                "; ".join(proposal_row.get("reasons", []))
+                if proposal_row
+                else "position_follow_up_not_run"
+            )
+        elif plan_status == "rejected":
+            reasons = proposal_row.get("reasons", [])
+            reason = "; ".join(reasons) if reasons else "position_follow_up_rejected"
+            follow_status = (
+                "incomplete"
+                if any("quote" in item or "valuation" in item for item in reasons)
+                else "rejected"
+            )
+        elif plan_status == "model_abstained":
+            follow_status = "abstained"
+            reason = "model_abstained"
+        elif plan_status != "accepted":
+            follow_status = "incomplete"
+            reason = "position_follow_up_unavailable"
+        candidate = candidates.get(position.market)
+        review = review_rows.get(position.market)
+        source_reasons = []
+        history_status = history_collection.get(position.market, {})
+        if history_status.get("status") == "incomplete":
+            source_reasons.append(
+                history_status.get("reason") or "position_historical_analysis_incomplete"
+            )
+        if position_tracking_only:
+            if not _has_fresh_position_history(facts, position.market, now):
+                source_reasons.append("position_historical_evidence_incomplete")
+        else:
+            if research_source_status in {"unavailable", "error"}:
+                source_reasons.append("research_unavailable")
+            if review_source_status in {"unavailable", "error"}:
+                source_reasons.append("review_unavailable")
+            if candidate is None:
+                source_reasons.append("position_not_in_current_research_scope")
+            else:
+                if candidate.get("status") == "partial":
+                    source_reasons.append("position_research_partial")
+                if candidate.get("required_missing_refs"):
+                    source_reasons.append("position_required_evidence_missing")
+                if not candidate.get("fact_refs"):
+                    source_reasons.append("position_current_evidence_missing")
+            if review is None:
+                source_reasons.append("position_review_unavailable")
+            elif review.get("verdict") == "insufficient":
+                source_reasons.append("position_review_insufficient")
+        if proposal_row and proposal_row.get("status") == "accepted":
+            current_market_refs = {
+                reference
+                for reference, fact in facts.items()
+                if isinstance(fact, dict) and fact.get("market") == position.market
+            }
+            cited_current_refs = set(proposal_row.get("references", [])) & current_market_refs
+            if not any(
+                _fact_freshness(facts[reference], now) == "fresh"
+                for reference in cited_current_refs
+            ):
+                source_reasons.append("position_current_evidence_not_cited_or_fresh")
+        source_incomplete = bool(source_reasons)
+        if source_incomplete:
+            follow_status = "incomplete"
+            reason = ";".join(dict.fromkeys([*source_reasons, *([reason] if reason else [])]))
+        if (
+            source_incomplete
+            and proposal_row
+            and proposal_row.get("action") in {"hold", "reduce", "close"}
+            and proposal_row.get("status") == "accepted"
+        ):
+            proposal_row["status"] = "not_evaluated"
+            proposal_row["reasons"] = list(
+                dict.fromkeys(
+                    [*proposal_row.get("reasons", []), "position_follow_up_evidence_incomplete"]
+                )
+            )
+            for key in ("amount_eur", "quantity", "requested_quantity", "requested_amount_eur"):
+                proposal_row.pop(key, None)
+        plan_status = proposal_row.get("status") if proposal_row else "not_evaluated"
+        tracking_rows[position.key] = {
+            "position_key": position.key,
+            "market": position.market,
+            "status": follow_status,
+            "action": proposal_row.get("action")
+            if proposal_row and follow_status in {"reviewed", "abstained", "rejected"}
+            else None,
+            "suggested_action": proposal_row.get("action")
+            if proposal_row and follow_status == "incomplete"
+            else None,
+            "rationale": proposal_row.get("rationale") if proposal_row else None,
+            "references": proposal_row.get("references", []) if proposal_row else [],
+            "reason": reason,
+            "entry_thesis_status": thesis.get("status", "not_found") if thesis else "not_found",
+            "entry_thesis_reference": thesis.get("reference") if thesis else None,
+            "entry_thesis": (
+                {
+                    "rationale": thesis.get("rationale"),
+                    "horizon": thesis.get("horizon"),
+                    "invalidation_conditions": thesis.get("invalidation_conditions", []),
+                    "source_cycle_id": thesis.get("source_cycle_id"),
+                    "historical_only": True,
+                }
+                if thesis and thesis.get("status") == "verified"
+                else None
+            ),
+            "source_status": (
+                "position_tracking_only"
+                if position_tracking_only
+                else "research_unavailable"
+                if research_source_status in {"unavailable", "error"}
+                else "review_unavailable"
+                if review_source_status in {"unavailable", "error"}
+                else "not_in_discovery_shortlist"
+                if candidate is None
+                else candidate.get("status", "unknown")
+            ),
+            "missing_references": candidate.get("missing_refs", [])
+            if candidate
+            else sorted(
+                reference
+                for reference, row in missing_ledger.items()
+                if isinstance(row, dict) and row.get("market") == position.market
+            )[:20],
+            "proposal_status": plan_status,
+        }
+    result["position_tracking"]["positions"] = [
+        tracking_rows[position.key] for position in open_positions
+    ]
+    result["position_tracking"]["budget"].update(
+        {
+            "selected_positions": len(tracked_positions),
+            "omitted_positions": len(omitted_positions),
+            "generated_tokens": sum(
+                row.get("eval_count") or 0
+                for row in call_records
+                if row.get("target_type") == "position_tracking"
+            ),
+        }
+    )
+    result["position_tracking"]["status"] = (
+        "no_open_positions"
+        if not open_positions
+        else "complete"
+        if all(
+            row.get("status") in {"reviewed", "abstained", "rejected"}
+            for row in tracking_rows.values()
+        )
+        else "partial"
+    )
     result["plan_evaluation_order"] = evaluation_order
     if _portfolio_fingerprint(portfolio) != result["portfolio_snapshot"]["sha256"]:
         result["errors"].append("portfolio_mutated_during_read_only_cycle")
@@ -465,7 +1104,13 @@ def run_proposal_cycle(
     quote_failures = any(row["status"] != "available" for row in quote_diagnostics)
     result["technical_status"] = (
         "partial"
-        if not all_calls_finished or omitted_model_markets or quote_failures or model_errors
+        if (
+            not all_calls_finished
+            or omitted_model_markets
+            or quote_failures
+            or model_errors
+            or result["position_tracking"]["status"] == "partial"
+        )
         else "completed"
     )
     result["status"] = result["technical_status"]
@@ -483,7 +1128,7 @@ def _validate_inputs(research, review, research_sha256, now):
         "autonomous-research."
     ):
         raise ProposalCycleError("research_schema_invalid")
-    if research.get("status") not in {"completed", "partial"}:
+    if research.get("status") not in {"completed", "partial", "unavailable", "error"}:
         raise ProposalCycleError("research_report_not_completed")
     if (
         research.get("read_only") is not True
@@ -498,15 +1143,37 @@ def _validate_inputs(research, review, research_sha256, now):
         raise ProposalCycleError("review_schema_invalid")
     if review.get("source_report_sha256") != research_sha256:
         raise ProposalCycleError("review_source_fingerprint_mismatch")
-    if review.get("status") not in {"completed", "partial"} or not isinstance(
-        review.get("review"), dict
+    tracking_review_not_applicable = (
+        review.get("status") == "not_applicable"
+        and review.get("review_scope") == "position_tracking_only"
+        and research.get("cycle_mode") == "position_tracking_only"
+    )
+    if (
+        review.get("read_only") is not True
+        or review.get("financial_action_executed") is not False
+        or (
+            review.get("status") not in {"completed", "partial", "unavailable", "error"}
+            and not tracking_review_not_applicable
+        )
     ):
-        raise ProposalCycleError("review_unavailable")
+        raise ProposalCycleError("review_report_contract_invalid")
     _check_age(review.get("generated_at"), now, MAX_REVIEW_AGE_SECONDS, "review_report")
-    rows = (research.get("conclusion") or {}).get("candidates")
+    research_unavailable = research.get("status") in {"unavailable", "error"}
+    review_unavailable = review.get("status") in {"unavailable", "error"}
+    conclusion = research.get("conclusion")
+    rows = conclusion.get("candidates") if isinstance(conclusion, dict) else None
     facts = research.get("fact_ledger")
     missing = research.get("missing_ledger")
-    review_rows = review["review"].get("candidates")
+    review_payload = review.get("review")
+    review_rows = (
+        review_payload.get("candidates")
+        if isinstance(review_payload, dict) and not review_unavailable
+        else []
+    )
+    if research_unavailable:
+        rows = rows if isinstance(rows, list) else []
+        facts = facts if isinstance(facts, dict) else {}
+        missing = missing if isinstance(missing, dict) else {}
     if not isinstance(rows, list) or not isinstance(facts, dict) or not isinstance(missing, dict):
         raise ProposalCycleError("research_ledgers_invalid")
     if not isinstance(review_rows, list):
@@ -558,54 +1225,227 @@ def _validate_inputs(research, review, research_sha256, now):
         if row["market"] in review_by_market:
             raise ProposalCycleError("review_market_duplicate")
         review_by_market[row["market"]] = row
-    if len(candidate_by_market) != len(review_by_market):
+    if not review_unavailable and len(candidate_by_market) != len(review_by_market):
         raise ProposalCycleError("review_candidate_scope_mismatch")
     return candidate_by_market, review_by_market, facts
 
 
-def _build_context(candidates, reviews, facts, portfolio, now, target_market):
+def _has_fresh_position_history(facts, market, now):
+    required_metrics = (
+        "returns_pct.24h",
+        "returns_pct.7d",
+        "returns_pct.30d",
+        "sma20_close",
+        "sma50_close",
+        "sma20_vs_sma50_pct",
+    )
+    for metric in required_metrics:
+        fact = facts.get(f"history:{market}:{metric}")
+        if (
+            not isinstance(fact, dict)
+            or not isinstance(fact.get("value"), dict)
+            or fact["value"].get("availability") != "available"
+            or _fact_freshness(fact, now) != "fresh"
+        ):
+            return False
+    return True
+
+
+def _collect_position_history(history_client, market, now):
+    """Fetch at most one bounded candle response and normalize it into ledger facts."""
+    base, separator, quote = market.partition("-")
+    if not separator or quote != "EUR":
+        raise ProposalCycleError("position_history_market_invalid")
+    scan = {
+        "collected_at": now.astimezone(timezone.utc).isoformat(),
+        "candidates": [{"market": market, "base_asset": base, "quote_asset": quote}],
+    }
+    report = DeepMarketAnalyzer(history_client, now_provider=lambda: now).analyze(
+        scan,
+        count=1,
+        interval="1h",
+        limit=1440,
+    )
+    item = report.get("candidates", [{}])[0]
+    collected_at = report.get("generated_at") or now.astimezone(timezone.utc).isoformat()
+    fact_rows, missing_rows = {}, {}
+    for observation in build_candidate_observations(item):
+        reference = f"history:{market}:{observation['metric']}"
+        value = {
+            key: observation.get(key)
+            for key in (
+                "value",
+                "unit",
+                "horizon",
+                "candle_interval",
+                "window",
+                "observation_count",
+                "availability",
+                "freshness",
+                "reason",
+            )
+        }
+        row = {
+            "reference": reference,
+            "market": market,
+            "value": value,
+            "source": "bitvavo_historical_analysis",
+            "collected_at": collected_at,
+            "source_at": None,
+        }
+        if observation["availability"] == "available":
+            fact_rows[reference] = row
+        else:
+            missing_rows[reference] = {
+                "reference": reference,
+                "market": market,
+                "availability": observation["availability"],
+                "reason": observation.get("reason") or "historical_metric_unavailable",
+                "source": "bitvavo_historical_analysis",
+                "collected_at": collected_at,
+            }
+    metrics = item.get("metrics", {})
+    quality = item.get("metric_quality", {})
+    freshest = next(
+        (
+            row.get("freshness")
+            for row in quality.values()
+            if isinstance(row, dict) and isinstance(row.get("freshness"), dict)
+        ),
+        {"fresh": False, "age_seconds": None},
+    )
+    for metric, unit in (
+        ("contiguous_interval_returns_used", "candle interval count"),
+        ("sma20_window_contiguous", "boolean"),
+        ("sma50_window_contiguous", "boolean"),
+    ):
+        if metric not in metrics:
+            continue
+        raw_value = metrics[metric]
+        available = (
+            raw_value > 0 if metric == "contiguous_interval_returns_used" else raw_value is True
+        )
+        reference = f"history:{market}:{metric}"
+        value = {
+            "value": raw_value,
+            "unit": unit,
+            "availability": "available" if available else "unavailable",
+            "freshness": freshest,
+            "reason": None if available else "required_contiguous_history_unavailable",
+        }
+        if available:
+            fact_rows[reference] = {
+                "reference": reference,
+                "market": market,
+                "value": value,
+                "source": "bitvavo_historical_analysis",
+                "collected_at": collected_at,
+                "source_at": None,
+            }
+        else:
+            missing_rows[reference] = {
+                "reference": reference,
+                "market": market,
+                "availability": "unavailable",
+                "reason": value["reason"],
+                "source": "bitvavo_historical_analysis",
+                "collected_at": collected_at,
+            }
+    return item, fact_rows, missing_rows
+
+
+def _build_context(
+    candidates,
+    reviews,
+    facts,
+    portfolio,
+    now,
+    target_market,
+    entry_theses=None,
+    tracked_position_keys=None,
+    missing_facts=None,
+):
     portfolio_rows = []
+    entry_theses = entry_theses or {}
+    tracked_position_keys = tracked_position_keys or set()
     for key, position in sorted(portfolio.positions.items()):
-        if position.quantity:
+        if position.quantity and position.market == target_market and key in tracked_position_keys:
+            thesis = entry_theses.get(key)
             portfolio_rows.append(
                 {
                     "key": key,
                     "reference": f"portfolio:{key}:position",
                     "quantity": str(position.quantity),
                     "cost_basis_eur": str(position.cost_basis_eur),
+                    "entry_thesis": (
+                        {
+                            "status": "verified_historical",
+                            "source_cycle_id": thesis.get("source_cycle_id"),
+                            "rationale": thesis.get("rationale"),
+                            "references": thesis.get("references", []),
+                            "horizon": thesis.get("horizon"),
+                            "invalidation_conditions": thesis.get("invalidation_conditions", []),
+                        }
+                        if thesis and thesis.get("status") == "verified"
+                        else {"status": "not_recorded"}
+                    ),
                 }
             )
     candidate_rows = []
-    for market, candidate in (
-        [(target_market, candidates[target_market])] if target_market in candidates else []
-    ):
-        review = reviews[market]
-        evidence = []
-        for ref in candidate["fact_refs"]:
-            fact = facts[ref]
-            evidence.append(
-                {
-                    "reference": ref,
-                    "source": fact.get("source"),
-                    "collected_at": fact.get("collected_at"),
-                    "value": _compact(fact.get("value")),
-                    "freshness_for_entry": _fact_freshness(fact, now),
-                }
-            )
+    candidate = candidates.get(target_market)
+    review = reviews.get(target_market)
+    fact_refs = sorted(
+        set(candidate.get("fact_refs", []) if candidate else [])
+        | {
+            reference
+            for reference, fact in facts.items()
+            if isinstance(fact, dict)
+            and fact.get("market") == target_market
+            and fact.get("source") == "bitvavo_historical_analysis"
+        }
+    )[:32]
+    evidence = [
+        {
+            "reference": ref,
+            "source": facts[ref].get("source"),
+            "collected_at": facts[ref].get("collected_at"),
+            "value": _compact(facts[ref].get("value")),
+            "freshness_for_entry": _fact_freshness(facts[ref], now),
+        }
+        for ref in fact_refs
+        if ref in facts and isinstance(facts[ref], dict)
+    ]
+    missing_facts = missing_facts if isinstance(missing_facts, dict) else {}
+    missing_refs = (
+        candidate.get("missing_refs", [])
+        if candidate
+        else sorted(
+            reference
+            for reference, missing in missing_facts.items()
+            if isinstance(missing, dict) and missing.get("market") == target_market
+        )[:20]
+    )
+    if candidate is not None or evidence or missing_refs or review is not None or portfolio_rows:
         accepted_refs = [
             arg.get("reference")
             for key in ("favorable_arguments", "unfavorable_arguments", "uncertain_arguments")
-            for arg in review.get(key, [])
+            for arg in (review or {}).get(key, [])
             if isinstance(arg, dict)
         ]
         candidate_rows.append(
             {
-                "market": market,
-                "research_status": candidate.get("status"),
-                "required_missing_refs": candidate.get("required_missing_refs", []),
-                "review_verdict": review.get("verdict"),
-                "review_rejected_count": len(review.get("rejected_arguments", []))
-                + len(review.get("rejected_invalidation_conditions", [])),
+                "market": target_market,
+                "research_status": candidate.get("status")
+                if candidate
+                else "not_in_discovery_shortlist",
+                "missing_refs": missing_refs,
+                "required_missing_refs": candidate.get("required_missing_refs", [])
+                if candidate
+                else [],
+                "review_status": "available" if review else "unavailable_or_not_in_scope",
+                "review_verdict": (review or {}).get("verdict"),
+                "review_rejected_count": len((review or {}).get("rejected_arguments", []))
+                + len((review or {}).get("rejected_invalidation_conditions", [])),
                 "review_arguments": [
                     {
                         "reference": arg.get("reference"),
@@ -617,7 +1457,7 @@ def _build_context(candidates, reviews, facts, portfolio, now, target_market):
                         "unfavorable_arguments",
                         "uncertain_arguments",
                     )
-                    for arg in review.get(key, [])
+                    for arg in (review or {}).get(key, [])
                     if isinstance(arg, dict)
                 ],
                 "accepted_review_refs": accepted_refs,
@@ -634,7 +1474,10 @@ def _build_context(candidates, reviews, facts, portfolio, now, target_market):
                 "Ne fonde jamais une taille sur ta confiance : ne donne aucune taille. Le code calcule les montants. "
                 "Pour un nouvel achat, la revue doit être supported sans rejet bloquant et les références utilisées doivent être acceptées par cette revue. "
                 "Une donnée manquante ou périmée affecte seulement les conclusions qui en dépendent. Une baisse seule n'impose ni vente ni renforcement. "
-                "Réduire ou conserver une position ne demande pas de nouvelle thèse d'achat. "
+                "Réduire, clôturer ou conserver une position ne demande pas de nouvelle thèse d'achat. "
+                "Une thèse d'entrée jointe est historique, pas une preuve actuelle; si elle est absente, indique ce manque sans l'inventer. "
+                "Ses références décrivent seulement son origine; cite la référence portfolio pour la position et les références courantes pour les faits actuels. "
+                "Une baisse seule n'invalide pas cette thèse. "
                 "Donne une justification courte, explicitement interprétative; n'invente aucune référence, marché, horizon ou invalidation. "
                 f"Produis exactement un objet de proposition pour le seul marché {target_market}; jamais une liste ni un autre marché. Réponds seulement au JSON schema."
             ),
@@ -647,10 +1490,10 @@ def _build_context(candidates, reviews, facts, portfolio, now, target_market):
                     "cash_eur": str(portfolio.cash_eur),
                     "initial_capital_eur": str(portfolio.initial_capital_eur),
                     "risk_policy": state["risk_policy"],
-                    "open_positions": portfolio_rows,
+                    "target_position": portfolio_rows,
                     "target_market": target_market,
                     "research_review": candidate_rows,
-                    "actions": ["buy", "reduce", "hold", "abstain"],
+                    "actions": ["buy", "reduce", "close", "hold", "abstain"],
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -670,7 +1513,10 @@ def _build_context(candidates, reviews, facts, portfolio, now, target_market):
         ],
         "properties": {
             "market": {"type": "string", "enum": [target_market]},
-            "action": {"type": "string", "enum": ["buy", "reduce", "hold", "abstain"]},
+            "action": {
+                "type": "string",
+                "enum": ["buy", "reduce", "close", "hold", "abstain"],
+            },
             "references": {"type": "array", "maxItems": 5, "items": {"type": "string"}},
             "rationale": {"type": "string", "maxLength": 300},
             "horizon": {"type": "string", "maxLength": 100},
@@ -698,7 +1544,7 @@ def _validate_single_proposal(payload, target_market, candidates, reviews, facts
     market, action = item["market"], item["action"]
     if market != target_market:
         raise ProposalCycleError("proposal_market_not_requested")
-    if not isinstance(action, str) or action not in {"buy", "reduce", "hold", "abstain"}:
+    if not isinstance(action, str) or action not in {"buy", "reduce", "close", "hold", "abstain"}:
         raise ProposalCycleError("proposal_action_invalid")
     refs = item["references"]
     if (
@@ -714,7 +1560,11 @@ def _validate_single_proposal(payload, target_market, candidates, reviews, facts
             held_positions.setdefault(position.market, []).append(position)
     candidate = candidates.get(market)
     review = reviews.get(market)
-    valid_refs = set(candidate["fact_refs"] if candidate else [])
+    valid_refs = set(candidate["fact_refs"] if candidate else []) | {
+        reference
+        for reference, fact in facts.items()
+        if isinstance(fact, dict) and fact.get("market") == market
+    }
     position_refs = {
         f"portfolio:{position.key}:position" for position in held_positions.get(market, [])
     }
@@ -729,6 +1579,8 @@ def _validate_single_proposal(payload, target_market, candidates, reviews, facts
         raise ProposalCycleError("proposal_justification_required")
     if action == "buy" and candidate is None:
         validation_errors.append("new_entry_requires_research_candidate")
+    if action == "buy" and held_positions.get(market):
+        validation_errors.append("existing_position_requires_hold_reduce_or_close")
     for ref in refs:
         if ref in facts:
             reason = _fact_freshness(facts[ref], now)
@@ -786,7 +1638,7 @@ def _validate_single_proposal(payload, target_market, candidates, reviews, facts
 def _evaluate_plans(proposals, candidates, reviews, facts, portfolio, quotes, now):
     """Preview deterministically on one shared disposable portfolio copy."""
     working = deepcopy(portfolio)
-    priority = {"reduce": 0, "buy": 1, "hold": 2, "abstain": 3}
+    priority = {"close": 0, "reduce": 1, "buy": 2, "hold": 3, "abstain": 4}
     ordered = sorted(
         enumerate(proposals),
         key=lambda pair: (
@@ -823,6 +1675,19 @@ def _evaluate_plans(proposals, candidates, reviews, facts, portfolio, quotes, no
             plans.append(plan)
             continue
         if action == "hold":
+            if (
+                any(
+                    position.quantity > 0 and position.market == market
+                    for position in working.positions.values()
+                )
+                and quotes.get(market) is None
+            ):
+                plan.update(
+                    status="not_evaluated",
+                    reasons=["position_follow_up_quote_unavailable"],
+                )
+                plans.append(plan)
+                continue
             plan.update(status="accepted", reasons=["no_financial_action; position unchanged"])
             plans.append(plan)
             continue
@@ -902,7 +1767,7 @@ def _evaluate_plans(proposals, candidates, reviews, facts, portfolio, quotes, no
             plan["requested_quantity"] = None
             if preview["status"] == "executed":
                 plan["budget_reserved_eur"] = str(cash_before - working.cash_eur)
-        else:
+        elif action in {"reduce", "close"}:
             held_matches = [
                 position
                 for position in working.positions.values()
@@ -917,11 +1782,14 @@ def _evaluate_plans(proposals, candidates, reviews, facts, portfolio, quotes, no
                 plans.append(plan)
                 continue
             held = held_matches[0]
-            max_notional = min(working.config.max_trade_eur, held.quantity * quote.bid)
-            step = quote.quantity_step
-            quantity = (max_notional / quote.bid / step).to_integral_value(
-                rounding=ROUND_FLOOR
-            ) * step
+            if action == "close":
+                quantity = held.quantity
+            else:
+                max_notional = min(working.config.max_trade_eur, held.quantity * quote.bid)
+                step = quote.quantity_step
+                quantity = (max_notional / quote.bid / step).to_integral_value(
+                    rounding=ROUND_FLOOR
+                ) * step
             preview = engine.execute(
                 working,
                 MultiAssetOrder(

@@ -435,6 +435,16 @@ def build_candidate_observations(candidate):
     """Render every measured metric from snapshot values and its own quality record."""
     observations = []
     for name, value in _metric_paths(candidate.get("metrics", {})):
+        # Quality flags and counts live beside measured values in the history
+        # result, but are not market metrics and have no metric_quality row.
+        # Exposing them as "unreported" observations made valid history look
+        # missing to downstream consumers.
+        if isinstance(value, bool) or name in {
+            "contiguous_interval_returns_used",
+            "sma20_window_contiguous",
+            "sma50_window_contiguous",
+        }:
+            continue
         quality = candidate.get("metric_quality", {}).get(name)
         quality = quality if isinstance(quality, dict) else {}
         observations.append(

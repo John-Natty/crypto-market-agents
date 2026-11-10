@@ -28,7 +28,7 @@ from crypto_market_agents.file_utils import reserve_report_paths
 from crypto_market_agents.security import redact_text
 from crypto_market_agents.trading.cli import add_paper_parser, run_paper
 from crypto_market_agents.trading.multi_asset_cli import add_multi_asset_parser, run_multi_asset
-from crypto_market_agents.trading.scanner import BitvavoScanner, ScanConfig
+from crypto_market_agents.trading.scanner import BitvavoMarketDiscovery, BitvavoScanner, ScanConfig
 from crypto_market_agents.trading.history_client import BitvavoCandleClient
 from crypto_market_agents.trading.deep_analysis import DeepMarketAnalyzer
 from crypto_market_agents.trading.autonomous_research import (
@@ -317,10 +317,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Génération maximale par marché (128–1200 tokens).",
     )
     cycle.add_argument(
+        "--tracking-num-predict",
+        type=int,
+        default=384,
+        help="Budget séparé par position ouverte suivie (128–1200 tokens).",
+    )
+    cycle.add_argument(
+        "--max-tracked-positions",
+        type=int,
+        default=10,
+        help="Maximum de positions suivies par cycle (1–10).",
+    )
+    cycle.add_argument(
         "--total-num-predict",
         type=int,
-        default=4000,
-        help="Budget cumulé de génération (au plus 8192 tokens).",
+        default=8192,
+        help="Budget cumulé de suivi et découverte (au plus 8192 tokens).",
+    )
+    cycle.add_argument(
+        "--history-reports-dir",
+        default="reports",
+        help="Répertoire borné des cycles antérieurs pour les thèses d’entrée vérifiées.",
+    )
+    cycle.add_argument(
+        "--position-tracking-only",
+        action="store_true",
+        help="Évaluer uniquement les positions ouvertes, sans revue de découverte.",
     )
     cycle.add_argument(
         "--num-ctx", type=int, default=8192, help="Contexte Ollama (4096–32768 tokens)."
@@ -330,7 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Engager explicitement les plans acceptés dans le portefeuille fictif, sans ordre réel.",
     )
     execute_cycle.add_argument(
-        "--plan-json", required=True, help="Nouveau rapport proposal-cycle v2."
+        "--plan-json", required=True, help="Nouveau rapport proposal-cycle v3."
     )
     execute_cycle.add_argument("--research-json", required=True, help="Rapport source figé.")
     execute_cycle.add_argument("--review-json", required=True, help="Revue source figée.")
@@ -340,6 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
     execute_cycle.add_argument(
         "--json", dest="json_path", required=True, help="Nouveau rapport d'exécution."
     )
+    position_history = subparsers.add_parser(
+        "position-history",
+        help="Collecter l'historique Bitvavo borné des positions ouvertes, sans scanner.",
+    )
+    position_history.add_argument("--state", required=True)
+    position_history.add_argument("--reports-dir", default="reports")
+    position_history.add_argument("--json", dest="json_path", required=True)
+    position_history.add_argument("--max-positions", type=int, default=10)
+    position_history.add_argument("--request-timeout", type=int, default=8)
     automatic = subparsers.add_parser(
         "automatic-paper-cycle",
         help="Orchestrer research, revue, proposition et éventuellement exécution fictive.",
@@ -352,6 +383,11 @@ def build_parser() -> argparse.ArgumentParser:
     automatic.add_argument("--interval-seconds", type=int, default=3600)
     automatic.add_argument("--resume", help="Dossier d'un cycle interrompu à reprendre.")
     automatic.add_argument(
+        "--tracking-only",
+        action="store_true",
+        help="Suivre les positions ouvertes sans scanner, discovery ni revue de nouveaux candidats.",
+    )
+    automatic.add_argument(
         "--stop-file", help="Si présent, terminer l'étape courante sans démarrer la suivante."
     )
     automatic.add_argument(
@@ -361,11 +397,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     automatic.add_argument("--enable-gnews", action="store_true")
     automatic.add_argument("--confirm-gnews-free-plan", action="store_true")
-    automatic.add_argument("--cycle-timeout", type=int, default=600)
-    automatic.add_argument("--cycle-llm-calls", type=int, default=20)
-    automatic.add_argument("--cycle-generation-tokens", type=int, default=12000)
-    automatic.add_argument("--cycle-external-tools", type=int, default=25)
-    automatic.add_argument("--cycle-http-requests", type=int, default=100)
+    automatic.add_argument("--cycle-timeout", type=int, default=800)
+    automatic.add_argument("--cycle-llm-calls", type=int, default=30)
+    automatic.add_argument("--cycle-generation-tokens", type=int, default=16000)
+    automatic.add_argument("--cycle-external-tools", type=int, default=30)
+    automatic.add_argument("--cycle-http-requests", type=int, default=120)
     automatic.add_argument("--research-candidates", type=int, default=5)
     automatic.add_argument("--research-tool-calls", type=int, default=10)
     automatic.add_argument("--research-timeout", type=int, default=300)
@@ -377,7 +413,9 @@ def build_parser() -> argparse.ArgumentParser:
     automatic.add_argument("--review-num-predict", type=int, default=900)
     automatic.add_argument("--proposal-timeout", type=int, default=60)
     automatic.add_argument("--proposal-num-predict", type=int, default=800)
-    automatic.add_argument("--proposal-total-num-predict", type=int, default=4000)
+    automatic.add_argument("--proposal-tracking-num-predict", type=int, default=384)
+    automatic.add_argument("--proposal-max-tracked-positions", type=int, default=10)
+    automatic.add_argument("--proposal-total-num-predict", type=int, default=8192)
     automatic.add_argument("--daily-seconds", type=int, default=3600)
     automatic.add_argument("--daily-llm-calls", type=int, default=60)
     automatic.add_argument("--daily-generation-tokens", type=int, default=30000)
@@ -421,6 +459,7 @@ def main(
                 invoke=lambda stage_args: main(stage_args),
                 model=args.model,
                 objective=args.objective,
+                tracking_only=args.tracking_only,
                 enable_paper_execution=args.enable_paper_execution,
                 enable_gnews=args.enable_gnews,
                 confirm_gnews_free_plan=args.confirm_gnews_free_plan,
@@ -455,6 +494,8 @@ def main(
                 proposal_limits={
                     "timeout": args.proposal_timeout,
                     "num_predict": args.proposal_num_predict,
+                    "tracking_num_predict": args.proposal_tracking_num_predict,
+                    "max_tracked_positions": args.proposal_max_tracked_positions,
                     "total_num_predict": args.proposal_total_num_predict,
                 },
             )
@@ -599,10 +640,12 @@ def main(
                     http_settings=gnews_settings,
                 )
 
-            def scan_with_budget(remaining):
+            def discover_with_budget(remaining):
                 if remaining < 3:
-                    raise TimeoutError("budget_exhausted_before_scan")
-                return BitvavoScanner(timeout=min(10, max(1, remaining / 3))).scan()
+                    raise TimeoutError("budget_exhausted_before_market_discovery")
+                return BitvavoMarketDiscovery(
+                    timeout=min(10, max(1, remaining / 3)), page_size=10
+                ).snapshot()
 
             def analyze_one(market, candidate, scan_result, remaining):
                 if remaining < 1:
@@ -703,7 +746,7 @@ def main(
             runner = AutonomousResearchRunner(
                 model=args.model,
                 ollama=evaluator,
-                scan=scan_with_budget,
+                discover=discover_with_budget,
                 analyze=analyze_one,
                 fundamentals=fundamentals_one,
                 news=news_one,
@@ -773,6 +816,37 @@ def main(
         print(f"Revue {result['status']} | JSON: {destination}")
         return 0
 
+    if args.command == "position-history":
+        try:
+            if not 1 <= args.max_positions <= 10 or not 1 <= args.request_timeout <= 8:
+                raise ValueError("historique_position_budget_invalid")
+            state_path = Path(args.state)
+            destination = Path(args.json_path)
+            if destination.exists() or destination.resolve() == state_path.resolve():
+                raise ValueError("Rapport d'historique existant ou confondu avec l'état.")
+            portfolio = MultiAssetPaperStore(state_path).load()
+            from crypto_market_agents.trading.proposal_cycle import collect_position_history_report
+
+            result = collect_position_history_report(
+                portfolio,
+                BitvavoCandleClient(timeout=args.request_timeout),
+                reports_dir=args.reports_dir,
+                limit=args.max_positions,
+                now=now_provider().astimezone(),
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("x", encoding="utf-8") as handle:
+                json.dump(result, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+            print(f"Suivi historique impossible: {type(exc).__name__}: {exc}")
+            return 1
+        status = result.get("status")
+        print(
+            f"Historique positions {status} | requêtes: {result['budget']['network_requests_used']} | JSON: {destination}"
+        )
+        return 0 if status in {"completed", "partial", "no_open_positions"} else 1
+
     if args.command == "proposal-cycle":
         try:
             source_research = Path(args.research_json)
@@ -798,10 +872,12 @@ def main(
                 args.model,
                 timeout=args.timeout,
                 num_predict=args.num_predict,
-                total_timeout=180,
+                total_timeout=400,
                 total_num_predict=args.total_num_predict,
                 num_ctx=args.num_ctx,
             )
+            from crypto_market_agents.trading.proposal_cycle import load_verified_entry_theses
+
             result = run_proposal_cycle(
                 research,
                 review,
@@ -813,10 +889,14 @@ def main(
                 review_label=source_review.as_posix(),
                 model=args.model,
                 num_predict=args.num_predict,
+                tracking_num_predict=args.tracking_num_predict,
+                max_tracked_positions=args.max_tracked_positions,
                 total_num_predict=args.total_num_predict,
                 timeout_seconds=args.timeout,
                 num_ctx=args.num_ctx,
                 now_provider=lambda: datetime.now().astimezone(),
+                entry_theses=load_verified_entry_theses(args.history_reports_dir, portfolio),
+                history_client=BitvavoCandleClient(timeout=8),
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
             with destination.open("x", encoding="utf-8") as handle:

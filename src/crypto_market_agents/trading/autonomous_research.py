@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import re
 import time
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ ALLOWED_TOOLS = {
     "finish_research",
 }
 OPTIONAL_GNEWS_TOOLS = {"get_gnews_market_news", "get_gnews_asset_news"}
+DISCOVERY_TOOLS = {"list_market_page"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +100,8 @@ class AutonomousResearchRunner:
         *,
         model: str,
         ollama,
-        scan: Callable[[float], dict[str, Any]],
+        scan: Callable[[float], dict[str, Any]] | None = None,
+        discover: Callable[[float], dict[str, Any]] | None = None,
         analyze: Callable[[str, dict[str, Any], dict[str, Any], float], dict[str, Any]],
         fundamentals: Callable[[str, dict[str, Any], float], dict[str, Any]],
         news: Callable[[str, str, dict[str, Any] | None, float], dict[str, Any]] | None = None,
@@ -112,7 +115,10 @@ class AutonomousResearchRunner:
             raise ValueError("Un modèle Ollama local est requis.")
         self.model = model.strip()
         self.ollama = ollama
+        if scan is None and discover is None:
+            raise ValueError("Une source de découverte des marchés est requise.")
         self.scan = scan
+        self.discover = discover
         self.analyze = analyze
         self.fundamentals = fundamentals
         self.news = news
@@ -132,6 +138,10 @@ class AutonomousResearchRunner:
         facts: dict[str, dict[str, Any]] = {}
         missing: dict[str, dict[str, Any]] = {}
         scan_result = None
+        discovery_mode = self.discover is not None
+        consulted_pages: list[int] = []
+        discovery_pages: list[dict[str, Any]] = []
+        choice_reasons: dict[str, list[dict[str, str]]] = {}
         final = None
         stop_reason = None
         used_tool_calls = 0
@@ -167,16 +177,24 @@ class AutonomousResearchRunner:
                 missing,
                 events,
                 None,
-                "budget_exhausted_before_scan",
+                "budget_exhausted_before_market_discovery",
                 started,
                 used_tool_calls,
                 reserved_tokens,
                 generated_tokens,
             )
         try:
-            scan_result = self.scan(remaining)
+            scan_result = self.discover(remaining) if discovery_mode else self.scan(remaining)
         except Exception as exc:
-            events.append(_event("initial_scan", {}, "error", _safe_error(exc), now_iso()))
+            events.append(
+                _event(
+                    "market_discovery" if discovery_mode else "initial_scan",
+                    {},
+                    "error",
+                    _safe_error(exc),
+                    now_iso(),
+                )
+            )
             return self._report(
                 objective,
                 scan_result,
@@ -185,69 +203,125 @@ class AutonomousResearchRunner:
                 missing,
                 events,
                 None,
-                "scanner_error",
+                "market_discovery_error" if discovery_mode else "scanner_error",
                 started,
                 used_tool_calls,
                 reserved_tokens,
                 generated_tokens,
             )
-        scanner_candidates = scan_result.get("candidates")
-        if not isinstance(scanner_candidates, list):
-            return self._report(
-                objective,
-                scan_result,
-                [],
-                facts,
-                missing,
-                events,
-                None,
-                "invalid_scanner_result",
-                started,
-                used_tool_calls,
-                reserved_tokens,
-                generated_tokens,
-            )
-        shortlist = scanner_candidates[:MAX_SHORTLIST]
-        candidate_by_market = {
-            row.get("market"): row
-            for row in shortlist
-            if isinstance(row, dict) and isinstance(row.get("market"), str)
-        }
-        markets = list(candidate_by_market)
-        for row in shortlist:
-            if not isinstance(row, dict) or not isinstance(row.get("market"), str):
-                continue
-            market = row["market"]
-            for key, value in row.items():
-                ref = f"scan:{market}:{key}"
-                _put_observation(
+
+        candidate_by_market = {}
+        markets = []
+        if discovery_mode:
+            try:
+                _validate_market_universe(scan_result)
+                first_page = _market_page(scan_result, 0) if scan_result["total_pages"] else None
+            except ValueError as exc:
+                return self._report(
+                    objective,
+                    scan_result,
+                    [],
                     facts,
                     missing,
-                    ref,
-                    value,
-                    source="bitvavo_scanner",
-                    collected_at=row.get("collected_at"),
-                    source_at=row.get("source_at"),
-                    unit=_scan_unit(key),
-                    reason="scanner_field_absent",
+                    events,
+                    None,
+                    str(exc),
+                    started,
+                    used_tool_calls,
+                    reserved_tokens,
+                    generated_tokens,
                 )
-        scan_context = {
-            "collected_at": scan_result.get("collected_at"),
-            "candidate_count": len(scanner_candidates),
-            "presented_count": len(markets),
-            "candidates": [_compact_scan(candidate_by_market[m]) for m in markets],
-        }
-        events.append(
-            _event(
-                "initial_scan",
-                {"candidate_count": len(scanner_candidates), "presented_count": len(markets)},
-                "success",
-                None,
-                now_iso(),
-                source="Bitvavo scanner",
+            if first_page is not None:
+                discovery_pages.append(first_page)
+                consulted_pages.append(0)
+                for row in first_page["items"]:
+                    _register_market_catalog_row(row, candidate_by_market, markets, facts, missing)
+            scan_result["consulted_pages"] = list(consulted_pages)
+            scan_result["consulted_pages_data"] = list(discovery_pages)
+            scan_result["choice_reasons"] = choice_reasons
+            events.append(
+                _event(
+                    "initial_market_page",
+                    {"page": 0 if first_page else None},
+                    "success",
+                    None,
+                    now_iso(),
+                    source=scan_result["source"],
+                    result_summary={
+                        "total_markets": scan_result["total_markets"],
+                        "total_pages": scan_result["total_pages"],
+                        "page_size": scan_result["page_size"],
+                        "market_ids": [row["market"] for row in first_page["items"]]
+                        if first_page
+                        else [],
+                        "references_examined": sorted(
+                            ref
+                            for ref, fact in facts.items()
+                            if fact.get("source") == "bitvavo_market_catalog"
+                        ),
+                    },
+                )
             )
-        )
-        if not markets:
+            scan_context = None
+        else:
+            scanner_candidates = scan_result.get("candidates")
+            if not isinstance(scanner_candidates, list):
+                return self._report(
+                    objective,
+                    scan_result,
+                    [],
+                    facts,
+                    missing,
+                    events,
+                    None,
+                    "invalid_scanner_result",
+                    started,
+                    used_tool_calls,
+                    reserved_tokens,
+                    generated_tokens,
+                )
+            shortlist = scanner_candidates[:MAX_SHORTLIST]
+            candidate_by_market = {
+                row.get("market"): row
+                for row in shortlist
+                if isinstance(row, dict) and isinstance(row.get("market"), str)
+            }
+            markets = list(candidate_by_market)
+            for row in shortlist:
+                if not isinstance(row, dict) or not isinstance(row.get("market"), str):
+                    continue
+                market = row["market"]
+                for key, value in row.items():
+                    ref = f"scan:{market}:{key}"
+                    _put_observation(
+                        facts,
+                        missing,
+                        ref,
+                        value,
+                        source="bitvavo_scanner",
+                        collected_at=row.get("collected_at"),
+                        source_at=row.get("source_at"),
+                        unit=_scan_unit(key),
+                        reason="scanner_field_absent",
+                    )
+            scan_context = {
+                "collected_at": scan_result.get("collected_at"),
+                "candidate_count": len(scanner_candidates),
+                "presented_count": len(markets),
+                "candidates": [_compact_scan(candidate_by_market[m]) for m in markets],
+            }
+            events.append(
+                _event(
+                    "initial_scan",
+                    {"candidate_count": len(scanner_candidates), "presented_count": len(markets)},
+                    "success",
+                    None,
+                    now_iso(),
+                    source="Bitvavo scanner (optional legacy path)",
+                )
+            )
+
+        if not markets and not discovery_mode:
             return self._report(
                 objective,
                 scan_result,
@@ -262,10 +336,30 @@ class AutonomousResearchRunner:
                 reserved_tokens,
                 generated_tokens,
             )
+        if discovery_mode and scan_result["total_markets"] == 0:
+            return self._report(
+                objective,
+                scan_result,
+                [],
+                facts,
+                missing,
+                events,
+                {"candidates": []},
+                "no_markets_available",
+                started,
+                used_tool_calls,
+                reserved_tokens,
+                generated_tokens,
+            )
         system_message = {
             "role": "system",
             "content": (
-                "Tu mènes une recherche en lecture seule pour l'objectif fourni. À chaque réponse, appelle exactement un seul outil parmi ceux déclarés, sur un seul marché. "
+                (
+                    "Tu explores en lecture seule l'univers paginé des marchés Bitvavo cotés en EUR. L'ordre des pages est alphabétique stable et ne constitue pas un classement. Aucun score, seuil de liquidité, spread ou performance n'a choisi les marchés qui te sont présentés. Consulte list_market_page pour choisir toi-même les autres pages; chaque page non consultée restera explicitement hors du périmètre observé. Ne prétends jamais avoir étudié l'ensemble de l'univers si des pages restent non consultées. Pour chaque page ou marché que tu demandes, indique un motif bref dans l'argument reason. Les observations consultées sont horodatées, unitisées et portent leur état de disponibilité. "
+                    if discovery_mode
+                    else "Tu mènes une recherche en lecture seule pour l'objectif fourni. Le chemin de scanner facultatif a fourni des observations présélectionnées. "
+                )
+                + "À chaque réponse, appelle exactement un seul outil parmi ceux déclarés, sur un seul marché. "
                 "N'émets jamais plusieurs tool_calls en parallèle : seul le premier sera examiné et les suivants seront rejetés sans exécution. "
                 "Ne réponds jamais en texte libre. Pour terminer, appelle finish_research; une réponse sans appel d'outil ne termine pas la recherche. "
                 "Tu peux choisir des marchés et des outils différents selon les observations; tu n'as pas à approfondir tous les candidats. "
@@ -294,6 +388,11 @@ class AutonomousResearchRunner:
                 {
                     "objective": objective.strip(),
                     "scanner_shortlist": scan_context,
+                    "market_universe": _market_universe_context(
+                        scan_result, discovery_pages, consulted_pages
+                    )
+                    if discovery_mode
+                    else None,
                     "limits": asdict(self.limits),
                     "read_only": True,
                 },
@@ -335,6 +434,11 @@ class AutonomousResearchRunner:
                 num_predict=token_budget,
                 safety_margin=self.limits.context_safety_margin_tokens,
                 include_gnews=self.gnews is not None,
+                discovery_mode=discovery_mode,
+                market_universe=scan_result if discovery_mode else None,
+                discovery_pages=discovery_pages,
+                consulted_pages=consulted_pages,
+                choice_reasons=choice_reasons,
             )
             if context is None or context.get("fits") is False:
                 if context and context.get("diagnostics"):
@@ -352,9 +456,10 @@ class AutonomousResearchRunner:
                 stop_reason = "context_budget_exhausted"
                 break
             if context["reduced_markets"] or context["omitted_refs"] or context["compacted_refs"]:
-                markets[:] = context["markets"]
-                for removed_market in context["reduced_markets"]:
-                    candidate_by_market.pop(removed_market, None)
+                if not discovery_mode:
+                    markets[:] = context["markets"]
+                    for removed_market in context["reduced_markets"]:
+                        candidate_by_market.pop(removed_market, None)
                 events.append(
                     _event(
                         "context_reduction",
@@ -504,6 +609,8 @@ class AutonomousResearchRunner:
             used_tool_calls += 1
             request_event = {"tool": name, "arguments": args}
             available_tools = set(ALLOWED_TOOLS)
+            if discovery_mode:
+                available_tools |= DISCOVERY_TOOLS
             if self.gnews is not None:
                 available_tools |= OPTIONAL_GNEWS_TOOLS
             if name not in available_tools:
@@ -513,7 +620,16 @@ class AutonomousResearchRunner:
                 stop_reason = "forbidden_tool_requested"
                 break
             try:
-                clean_args = _validate_tool_args(name, args, markets, self.limits.max_candidates)
+                clean_args = _validate_tool_args(
+                    name,
+                    args,
+                    markets,
+                    self.limits.max_candidates,
+                    market_pages=(
+                        list(range(scan_result["total_pages"])) if discovery_mode else None
+                    ),
+                    require_choice_reason=discovery_mode,
+                )
             except ValueError as exc:
                 events.append(_event("tool_call", request_event, "rejected", str(exc), now_iso()))
                 stop_reason = "invalid_tool_arguments"
@@ -533,6 +649,68 @@ class AutonomousResearchRunner:
                 )
                 continue
             seen_call_fingerprints.add(fingerprint)
+            if name == "list_market_page":
+                page_number = clean_args["page"]
+                if page_number in consulted_pages:
+                    events.append(
+                        _event(
+                            "tool_call",
+                            {"tool": name, "arguments": clean_args},
+                            "rejected",
+                            "market_page_already_consulted",
+                            now_iso(),
+                        )
+                    )
+                    continue
+                if research_deadline - self.monotonic() <= 0.1:
+                    events.append(
+                        _event(
+                            "tool_call",
+                            {"tool": name, "arguments": clean_args},
+                            "not_executed",
+                            "budget_exhausted_before_market_page",
+                            now_iso(),
+                        )
+                    )
+                    stop_reason = "budget_exhausted_before_market_page"
+                    break
+                page_result = _market_page(scan_result, page_number)
+                consulted_pages.append(page_number)
+                discovery_pages.append(page_result)
+                _append_choice_reason(
+                    choice_reasons,
+                    f"page:{page_number}",
+                    "list_market_page",
+                    clean_args["reason"],
+                )
+                for row in page_result["items"]:
+                    _register_market_catalog_row(row, candidate_by_market, markets, facts, missing)
+                scan_result["consulted_pages"] = list(consulted_pages)
+                scan_result["consulted_pages_data"] = list(discovery_pages)
+                scan_result["choice_reasons"] = choice_reasons
+                events.append(
+                    _event(
+                        "tool_call",
+                        {"tool": name, "arguments": clean_args},
+                        "success",
+                        None,
+                        now_iso(),
+                        result_summary={
+                            "page": page_number,
+                            "market_ids": [row["market"] for row in page_result["items"]],
+                            "references_examined": sorted(
+                                ref
+                                for ref, fact in facts.items()
+                                if fact.get("source") == "bitvavo_market_catalog"
+                                and fact.get("market")
+                                in {row["market"] for row in page_result["items"]}
+                            ),
+                        },
+                        choice_reason=clean_args["reason"],
+                    )
+                )
+                last_tool_feedback = None
+                continue
             if name == "finish_research":
                 try:
                     requested_scope = _validate_finish_scope(
@@ -550,6 +728,15 @@ class AutonomousResearchRunner:
                     )
                     stop_reason = "invalid_conclusion_scope"
                     break
+                if discovery_mode:
+                    for row in requested_scope:
+                        _append_choice_reason(
+                            choice_reasons,
+                            row["market"],
+                            "finish_research",
+                            row["reason"],
+                        )
+                    scan_result["choice_reasons"] = choice_reasons
                 events.append(
                     _event(
                         "tool_call",
@@ -563,6 +750,13 @@ class AutonomousResearchRunner:
                 break
 
             market = clean_args["market"]
+            if discovery_mode:
+                _append_choice_reason(
+                    choice_reasons,
+                    market,
+                    name,
+                    clean_args["reason"],
+                )
             if market not in deepened and len(deepened) >= self.limits.max_candidates:
                 events.append(
                     _event(
@@ -931,6 +1125,7 @@ class AutonomousResearchRunner:
         research_stop_reason=None,
     ):
         scan_candidates = scan.get("candidates", []) if isinstance(scan, dict) else []
+        is_catalog = isinstance(scan, dict) and isinstance(scan.get("pages"), list)
         market_set = set(markets or [])
         deepened = deepened or set()
         results_by_market = results_by_market or {}
@@ -940,7 +1135,7 @@ class AutonomousResearchRunner:
             == "partial_configured_source_coverage"
             for event in events
         )
-        report_completed = stop_reason == "no_scanner_candidates" or (
+        report_completed = stop_reason in {"no_scanner_candidates", "no_markets_available"} or (
             conclusion
             and conclusion.get("mode") == "model_structured"
             and research_stop_reason == "conclusion_requested"
@@ -949,7 +1144,8 @@ class AutonomousResearchRunner:
         )
         incomplete_status_reason = (
             f"research_stop:{research_stop_reason}"
-            if research_stop_reason not in {None, "conclusion_requested", "no_scanner_candidates"}
+            if research_stop_reason
+            not in {None, "conclusion_requested", "no_scanner_candidates", "no_markets_available"}
             else "execution_or_source_coverage_incomplete"
         )
         if conclusion and not report_completed:
@@ -979,6 +1175,13 @@ class AutonomousResearchRunner:
             model_row = model_rows.get(market)
             scope_row = scope_by_market.get(market, {})
             fact_refs = model_row["fact_refs"] if model_row else scope_row.get("fact_refs", [])
+            if is_catalog and not model_row and not fact_refs:
+                fact_refs = [
+                    ref
+                    for ref, fact in facts.items()
+                    if fact.get("market") == market
+                    and fact.get("source") == "bitvavo_market_catalog"
+                ]
             missing_refs = (
                 model_row["missing_refs"] if model_row else scope_row.get("missing_refs", [])
             )
@@ -993,6 +1196,7 @@ class AutonomousResearchRunner:
                 {
                     "market": market,
                     "deepened": market in deepened,
+                    "selection_reasons": (scan.get("choice_reasons") or {}).get(market, []),
                     "tools_executed": results_by_market.get(market, {}),
                     "fact_references": fact_refs,
                     "missing_references": missing_refs,
@@ -1029,13 +1233,14 @@ class AutonomousResearchRunner:
         ]
         research_status = (
             "completed"
-            if research_stop_reason in {"conclusion_requested", "no_scanner_candidates"}
+            if research_stop_reason
+            in {"conclusion_requested", "no_scanner_candidates", "no_markets_available"}
             and not incomplete_news_coverage
             and not any(event.get("status") in {"error", "not_executed"} for event in events)
             else "partial"
         )
         return {
-            "schema_version": "autonomous-research.v6",
+            "schema_version": "autonomous-research.v7",
             "generated_at": self.now_provider().astimezone(timezone.utc).isoformat(),
             "objective": objective.strip(),
             "status": "completed" if report_completed else "partial",
@@ -1045,13 +1250,33 @@ class AutonomousResearchRunner:
             "read_only": True,
             "financial_action_executed": False,
             "model": self.model,
-            "scan": {
-                "collected_at": scan.get("collected_at") if isinstance(scan, dict) else None,
-                "candidate_count": len(scan_candidates) if isinstance(scan_candidates, list) else 0,
-                "presented_count": len(market_set),
-                "omitted_from_model_shortlist": max(0, len(scan_candidates) - len(market_set)),
-                "source": "Bitvavo scanner",
-            },
+            "scan": (
+                {
+                    "status": "not_run",
+                    "reason": "research_uses_unranked_market_catalog",
+                    "source": None,
+                }
+                if is_catalog
+                else {
+                    "collected_at": scan.get("collected_at") if isinstance(scan, dict) else None,
+                    "candidate_count": len(scan_candidates)
+                    if isinstance(scan_candidates, list)
+                    else 0,
+                    "presented_count": len(market_set),
+                    "omitted_from_model_shortlist": max(0, len(scan_candidates) - len(market_set)),
+                    "source": "Bitvavo scanner (optional legacy path)",
+                }
+            ),
+            "market_universe": (
+                {
+                    **_market_universe_context(
+                        scan, scan.get("consulted_pages_data", []), scan.get("consulted_pages", [])
+                    ),
+                    "pages_consulted_data": scan.get("consulted_pages_data", []),
+                }
+                if is_catalog
+                else None
+            ),
             "candidates": candidates,
             "conclusion": conclusion,
             "fact_ledger": facts,
@@ -1100,6 +1325,13 @@ class AutonomousResearchRunner:
             ]
             + (
                 [
+                    "L'univers est limité aux marchés EUR exposés par l'API publique Bitvavo. Les pages non consultées et les plateformes décentralisées ne sont pas couvertes. L'ordre alphabétique sert uniquement à la pagination et ne constitue pas une sélection d'investissement."
+                ]
+                if is_catalog
+                else []
+            )
+            + (
+                [
                     "GNews a été activé explicitement; le plan du compte n'est pas vérifiable par l'application, sa couverture reste partielle et son contenu ne peut autoriser une opération."
                 ]
                 if self.gnews is not None
@@ -1108,40 +1340,64 @@ class AutonomousResearchRunner:
         }
 
 
-def _tool_schemas(markets, max_candidates, *, include_gnews=False):
+def _tool_schemas(
+    markets,
+    max_candidates,
+    *,
+    include_gnews=False,
+    market_pages=None,
+    require_choice_reason=False,
+):
     market_schema = {"type": "string", "enum": markets}
+    market_required = ["market", "reason"] if require_choice_reason else ["market"]
+    market_properties = {"market": market_schema}
+    if require_choice_reason:
+        market_properties["reason"] = {"type": "string", "minLength": 1, "maxLength": 240}
     schemas = [
+        *(
+            [
+                _tool(
+                    "list_market_page",
+                    "Consulter une page stable du catalogue Bitvavo EUR non classé. Indique en une phrase pourquoi tu choisis cette page.",
+                    {
+                        "page": {"type": "integer", "enum": market_pages or []},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+                    },
+                    ["page", "reason"],
+                )
+            ]
+            if market_pages is not None
+            else []
+        ),
         _tool(
             "analyze_candidate",
             "Demander l'analyse historique d'un marché précis.",
-            {
-                "market": market_schema,
-            },
-            ["market"],
+            market_properties,
+            market_required,
         ),
         _tool(
             "get_fundamentals",
             "Consulter ou demander le dossier factuel existant d'un marché.",
             {
-                "market": market_schema,
+                **market_properties,
             },
-            ["market"],
+            market_required,
         ),
         _tool(
             "get_market_news",
             "Demander les nouvelles des flux généraux configurés pour une recherche de marché précise.",
-            {"market": market_schema},
-            ["market"],
+            market_properties,
+            market_required,
         ),
         _tool(
             "get_asset_news",
             "Demander les articles attribuables par le code à une identité d'actif vérifiée.",
-            {"market": market_schema},
-            ["market"],
+            market_properties,
+            market_required,
         ),
         _tool(
             "finish_research",
-            "Sélectionner les références de faits, les absences facultatives et celles qui bloquent directement l'objectif; les absences bloquantes doivent être un sous-ensemble exact des absences sélectionnées.",
+            "Sélectionner les références de faits et d'informations manquantes; en mode catalogue, indiquer aussi le motif du choix de chaque marché.",
             {
                 "candidates": {
                     "type": "array",
@@ -1154,9 +1410,15 @@ def _tool_schemas(markets, max_candidates, *, include_gnews=False):
                             "fact_refs",
                             "missing_refs",
                             "required_missing_refs",
-                        ],
+                        ]
+                        + (["reason"] if require_choice_reason else []),
                         "properties": {
                             "market": market_schema,
+                            **(
+                                {"reason": {"type": "string", "minLength": 1, "maxLength": 240}}
+                                if require_choice_reason
+                                else {}
+                            ),
                             "fact_refs": {
                                 "type": "array",
                                 "maxItems": 32,
@@ -1180,18 +1442,18 @@ def _tool_schemas(markets, max_candidates, *, include_gnews=False):
         ),
     ]
     if include_gnews:
-        schemas[4:4] = [
+        schemas[-1:-1] = [
             _tool(
                 "get_gnews_market_news",
                 "Rechercher un contexte crypto général via GNews; couverture gratuite retardée et partielle, aucun résultat ne prouve l'absence d'événement.",
-                {"market": market_schema},
-                ["market"],
+                market_properties,
+                market_required,
             ),
             _tool(
                 "get_gnews_asset_news",
                 "Rechercher les actualités d'un nom d'actif vérifié; le code contrôle chaque résultat et sépare les homonymes et contenus promotionnels.",
-                {"market": market_schema},
-                ["market"],
+                market_properties,
+                market_required,
             ),
         ]
     return schemas
@@ -1225,9 +1487,31 @@ def _safe_tool_request(call):
     }
 
 
-def _validate_tool_args(name, args, markets, max_candidates):
+def _validate_tool_args(
+    name,
+    args,
+    markets,
+    max_candidates,
+    *,
+    market_pages=None,
+    require_choice_reason=False,
+):
     if not isinstance(args, dict):
         raise ValueError("tool_arguments_must_be_object")
+    if name == "list_market_page":
+        if market_pages is None or set(args) != {"page", "reason"}:
+            raise ValueError("market_page_arguments_invalid")
+        page = args.get("page")
+        reason = args.get("reason")
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page not in market_pages
+            or not isinstance(reason, str)
+            or not 1 <= len(reason.strip()) <= 240
+        ):
+            raise ValueError("market_page_arguments_invalid")
+        return {"page": page, "reason": reason.strip()}
     if name in {
         "analyze_candidate",
         "get_fundamentals",
@@ -1236,9 +1520,16 @@ def _validate_tool_args(name, args, markets, max_candidates):
         "get_gnews_market_news",
         "get_gnews_asset_news",
     }:
-        if set(args) != {"market"} or args.get("market") not in markets:
+        required_fields = {"market", "reason"} if require_choice_reason else {"market"}
+        if set(args) != required_fields or args.get("market") not in markets:
             raise ValueError("tool_arguments_invalid_market_or_fields")
-        return {"market": args["market"]}
+        cleaned = {"market": args["market"]}
+        if require_choice_reason:
+            reason = args.get("reason")
+            if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 240:
+                raise ValueError("tool_choice_reason_invalid")
+            cleaned["reason"] = reason.strip()
+        return cleaned
     if name == "finish_research":
         if set(args) != {"candidates"} or not isinstance(args["candidates"], list):
             raise ValueError("finish_arguments_invalid")
@@ -1246,11 +1537,17 @@ def _validate_tool_args(name, args, markets, max_candidates):
             raise ValueError("finish_candidate_count_exceeded")
         rows = []
         required = {"market", "fact_refs", "missing_refs", "required_missing_refs"}
+        if require_choice_reason:
+            required.add("reason")
         for row in args["candidates"]:
             if not isinstance(row, dict) or set(row) != required:
                 raise ValueError("finish_candidate_fields_invalid")
             if row["market"] not in markets:
                 raise ValueError("finish_market_not_in_shortlist")
+            if require_choice_reason and (
+                not isinstance(row.get("reason"), str) or not 1 <= len(row["reason"].strip()) <= 240
+            ):
+                raise ValueError("finish_choice_reason_invalid")
             for key, limit in (
                 ("fact_refs", 32),
                 ("missing_refs", 32),
@@ -1382,7 +1679,7 @@ def _evidence_classes(fact_refs, missing_refs, facts):
     }
     for ref in fact_refs:
         item = facts.get(ref, {})
-        if ref.startswith(("scan:", "history:")):
+        if ref.startswith(("scan:", "history:", "market_catalog:")):
             groups["market_observations"].append(ref)
         elif ref.startswith("news:") and ":article:" in ref:
             groups["reported_source_claims"].append(ref)
@@ -1419,6 +1716,7 @@ def _scope_from_registry(markets, facts, missing):
             and item.get("source") != "gnews_excluded_result"
             and (
                 ref.startswith("history:")
+                or ref.startswith("market_catalog:")
                 or ref.startswith("fundamentals:")
                 or ref.startswith("news:")
                 or any(ref == f"scan:{market}:{key}" for key in scanner_fact_keys)
@@ -2184,6 +2482,64 @@ def _record_tool_facts(name, market, result, facts, missing, collected_at):
                     "availability": status,
                     "reason": observation.get("reason"),
                 }
+        # Publish continuity diagnostics as explicit quality facts. They are
+        # not price metrics, and must not pass through build_candidate_observations
+        # (which correctly handles only numeric observations).
+        metric_values = item.get("metrics", {})
+        quality_rows = item.get("metric_quality", {})
+        latest_quality = next(
+            (
+                row
+                for row in quality_rows.values()
+                if isinstance(row, dict) and isinstance(row.get("freshness"), dict)
+            ),
+            {},
+        )
+        for metric, unit in (
+            ("contiguous_interval_returns_used", "candle interval count"),
+            ("sma20_window_contiguous", "boolean"),
+            ("sma50_window_contiguous", "boolean"),
+        ):
+            if metric not in metric_values:
+                continue
+            ref = f"history:{market}:{metric}"
+            raw_value = metric_values[metric]
+            usable = (
+                raw_value > 0 if metric == "contiguous_interval_returns_used" else raw_value is True
+            )
+            quality_value = {
+                "value": raw_value,
+                "unit": unit,
+                "availability": "available" if usable else "unavailable",
+                "freshness": latest_quality.get("freshness"),
+                "reason": None if usable else "required_contiguous_history_unavailable",
+            }
+            if usable:
+                _put_fact(
+                    facts,
+                    ref,
+                    market,
+                    quality_value,
+                    "bitvavo_historical_analysis",
+                    collected_at,
+                )
+                refs.append(ref)
+                available_observations[ref] = quality_value
+            else:
+                _put_missing(
+                    missing,
+                    ref,
+                    market,
+                    "unavailable",
+                    quality_value["reason"],
+                    "bitvavo_historical_analysis",
+                    collected_at,
+                )
+                missing_refs.append(ref)
+                missing_observations[ref] = {
+                    "availability": "unavailable",
+                    "reason": quality_value["reason"],
+                }
         result_summary = {
             "market": market,
             "generated_at": result.get("generated_at"),
@@ -2381,6 +2737,204 @@ def _compact_scan(row):
     return compact
 
 
+def _validate_market_universe(snapshot):
+    if not isinstance(snapshot, dict):
+        raise ValueError("market_universe_invalid")
+    rows = snapshot.get("pages")
+    page_size = snapshot.get("page_size")
+    total_markets = snapshot.get("total_markets")
+    total_pages = snapshot.get("total_pages")
+    if (
+        snapshot.get("quote_currency") != "EUR"
+        or not isinstance(rows, list)
+        or isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or not 1 <= page_size <= 25
+        or isinstance(total_markets, bool)
+        or not isinstance(total_markets, int)
+        or total_markets < 0
+        or isinstance(total_pages, bool)
+        or not isinstance(total_pages, int)
+        or total_pages != len(rows)
+        or total_pages != (total_markets + page_size - 1) // page_size
+    ):
+        raise ValueError("market_universe_contract_invalid")
+    seen_markets = []
+    observation_keys = {
+        "base_asset",
+        "quote_asset",
+        "market_status",
+        "last",
+        "open_24h",
+        "price_change_24h_pct",
+        "volume_base_24h",
+        "volume_quote_24h",
+        "bid",
+        "ask",
+        "spread_pct",
+        "min_order_base",
+        "min_order_quote",
+    }
+    for expected_page, page in enumerate(rows):
+        page_number = page.get("page") if isinstance(page, dict) else None
+        if (
+            not isinstance(page, dict)
+            or isinstance(page_number, bool)
+            or page_number != expected_page
+        ):
+            raise ValueError("market_universe_page_sequence_invalid")
+        items = page.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) > page_size
+            or total_markets > 0
+            and not items
+            or expected_page < total_pages - 1
+            and len(items) != page_size
+        ):
+            raise ValueError("market_universe_page_items_invalid")
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("market"), str)
+                or not re.fullmatch(r"[A-Z0-9]{2,15}-EUR", item["market"])
+                or not isinstance(item.get("observations"), dict)
+            ):
+                raise ValueError("market_universe_market_invalid")
+            observations = item["observations"]
+            if set(observations) != observation_keys:
+                raise ValueError("market_universe_observation_keys_invalid")
+            for observation in observations.values():
+                if (
+                    not isinstance(observation, dict)
+                    or observation.get("availability") not in {"available", "unavailable"}
+                    or not isinstance(observation.get("unit"), str)
+                    or not isinstance(observation.get("collected_at"), str)
+                    or observation.get("source_at") is not None
+                    and not isinstance(observation.get("source_at"), str)
+                    or observation.get("availability") == "available"
+                    and observation.get("value") is None
+                    or observation.get("availability") == "unavailable"
+                    and (
+                        observation.get("value") is not None
+                        or not isinstance(observation.get("reason"), str)
+                    )
+                ):
+                    raise ValueError("market_universe_observation_invalid")
+            seen_markets.append(item["market"])
+    if len(seen_markets) != total_markets or seen_markets != sorted(set(seen_markets)):
+        raise ValueError("market_universe_order_or_count_invalid")
+
+
+def _market_page(snapshot, page_number):
+    if isinstance(page_number, bool) or not isinstance(page_number, int):
+        raise ValueError("market_page_index_invalid")
+    pages = snapshot.get("pages", [])
+    if not 0 <= page_number < len(pages):
+        raise ValueError("market_page_index_out_of_range")
+    return pages[page_number]
+
+
+def _register_market_catalog_row(row, candidate_by_market, markets, facts, missing):
+    market = row["market"]
+    candidate_by_market[market] = {
+        "market": market,
+        "base_asset": row.get("base_asset"),
+        "quote_asset": row.get("quote_asset"),
+        "status": row.get("status"),
+        "collected_at": row.get("collected_at"),
+        "source_at": row.get("source_at"),
+        "volume_base_24h": _catalog_value(row, "volume_base_24h"),
+        "volume_quote_24h_eur": _catalog_value(row, "volume_quote_24h"),
+        "price_change_24h_pct": _catalog_value(row, "price_change_24h_pct"),
+        "bid_eur": _catalog_value(row, "bid"),
+        "ask_eur": _catalog_value(row, "ask"),
+        "spread_pct": _catalog_value(row, "spread_pct"),
+        "min_order_base": _catalog_value(row, "min_order_base"),
+        "min_order_quote_eur": _catalog_value(row, "min_order_quote"),
+    }
+    if market not in markets:
+        markets.append(market)
+    for key, observation in row["observations"].items():
+        reference = f"market_catalog:{market}:{key}"
+        _put_observation(
+            facts,
+            missing,
+            reference,
+            observation.get("value"),
+            source="bitvavo_market_catalog",
+            collected_at=observation.get("collected_at") or row.get("collected_at"),
+            source_at=observation.get("source_at"),
+            unit=observation.get("unit"),
+            reason=observation.get("reason") or "market_observation_unavailable",
+        )
+
+
+def _catalog_value(row, key):
+    observation = (row.get("observations") or {}).get(key)
+    return observation.get("value") if isinstance(observation, dict) else None
+
+
+def _append_choice_reason(registry, subject, tool, reason):
+    if not isinstance(registry, dict):
+        return
+    registry.setdefault(subject, []).append({"tool": tool, "reason": reason})
+
+
+def _market_universe_context(snapshot, pages, consulted_pages):
+    if not isinstance(snapshot, dict):
+        return None
+    total_pages = snapshot.get("total_pages")
+    if isinstance(total_pages, bool) or not isinstance(total_pages, int) or total_pages < 0:
+        total_pages = 0
+    consulted = sorted(set(consulted_pages or []))
+    all_pages = list(range(total_pages))
+    return {
+        "source": snapshot.get("source"),
+        "quote_currency": snapshot.get("quote_currency"),
+        "collected_at": snapshot.get("collected_at"),
+        "ordering": snapshot.get("ordering"),
+        "total_markets": snapshot.get("total_markets"),
+        "page_size": snapshot.get("page_size"),
+        "total_pages": total_pages,
+        "pages_consulted": consulted,
+        "pages_not_consulted": [page for page in all_pages if page not in consulted],
+        "coverage_status": "complete"
+        if len(consulted) == len(all_pages)
+        else "partial_pages_unconsulted",
+        "page_results_in_context": len(pages or []),
+    }
+
+
+def _compact_market_catalog_page(page):
+    compact_items = []
+    for row in page.get("items", []):
+        compact_items.append(
+            {
+                "market": row.get("market"),
+                "base_asset": row.get("base_asset"),
+                "quote_asset": row.get("quote_asset"),
+                "status": row.get("status"),
+                "collected_at": row.get("collected_at"),
+                "source_at": row.get("source_at"),
+                "observations": {
+                    key: {
+                        "reference": f"market_catalog:{row.get('market')}:{key}",
+                        "value": observation.get("value"),
+                        "unit": observation.get("unit"),
+                        "availability": observation.get("availability"),
+                        "reason": observation.get("reason"),
+                        "collected_at": observation.get("collected_at"),
+                        "source_at": observation.get("source_at"),
+                        "source_timestamp_available": observation.get("source_timestamp_available"),
+                    }
+                    for key, observation in row.get("observations", {}).items()
+                },
+            }
+        )
+    return {"page": page.get("page"), "items": compact_items}
+
+
 def _budgeted_research_context(
     system_message,
     objective,
@@ -2397,13 +2951,26 @@ def _budgeted_research_context(
     num_predict,
     safety_margin,
     include_gnews=False,
+    discovery_mode=False,
+    market_universe=None,
+    discovery_pages=None,
+    consulted_pages=None,
+    choice_reasons=None,
 ):
     selected = list(markets)
     reduced = []
     failed_attempts = []
     while selected:
         active_tools = _tool_schemas(
-            selected, limits.get("max_candidates", 5), include_gnews=include_gnews
+            selected,
+            limits.get("max_candidates", 5),
+            include_gnews=include_gnews,
+            market_pages=(
+                list(range(market_universe.get("total_pages", 0)))
+                if discovery_mode and isinstance(market_universe, dict)
+                else None
+            ),
+            require_choice_reason=discovery_mode,
         )
         evidence = []
         compacted_refs = []
@@ -2461,7 +3028,7 @@ def _budgeted_research_context(
                     continue
                 # Scanner fields are already sent once in scanner_shortlist,
                 # with stable fact references; diagnostics remain in the report.
-                if ref.startswith(f"scan:{market}:"):
+                if ref.startswith(f"scan:{market}:") or ref.startswith(f"market_catalog:{market}:"):
                     continue
                 if item.get("source") in {"rss_feed", "gnews_api"} and isinstance(
                     item.get("value"), dict
@@ -2519,11 +3086,30 @@ def _budgeted_research_context(
                 _compact_scan(candidate_by_market[market])
                 for market in selected
                 if market in candidate_by_market
-            ],
+            ]
+            if not discovery_mode
+            else [],
+            "market_universe": (
+                _market_universe_context(market_universe, discovery_pages, consulted_pages)
+                if discovery_mode
+                else None
+            ),
+            "market_catalog_pages": (
+                [_compact_market_catalog_page(page) for page in discovery_pages or []]
+                if discovery_mode
+                else []
+            ),
+            "market_choice_reasons": choice_reasons or {},
             "previous_tool_results": operations,
             "code_feedback": feedback,
             "verified_observation_registry": evidence,
-            "context_policy": "Les références sont stables. Les mesures du scanner sont transmises une seule fois avec leurs références; les diagnostics scanner détaillés restent dans le rapport. Les actualités arrivent sous forme d'index (titre, éditeur, date, portée, fraîcheur, pertinence et référence); les extraits sont limités et les réponses brutes ne sont pas répétées. Les omissions de contexte sont tracées par référence. Une recherche générale n'établit aucun lien avec le candidat, une fenêtre sans résultat ne prouve pas l'absence d'événement, et seule la date de publication mesure la fraîcheur de l'article.",
+            "context_policy": "Les références sont stables. "
+            + (
+                "L'univers Bitvavo EUR est paginé par identifiant stable, sans score ni filtre d'admissibilité. Seules les pages consultées sont incluses; les autres restent explicitement non consultées. Les observations de marché de ces pages portent unités, dates et disponibilité."
+                if discovery_mode
+                else "Les mesures du scanner facultatif sont transmises une seule fois avec leurs références; les diagnostics scanner détaillés restent dans le rapport."
+            )
+            + " Les actualités arrivent sous forme d'index (titre, éditeur, date, portée, fraîcheur, pertinence et référence); les extraits sont limités et les réponses brutes ne sont pas répétées. Les omissions de contexte sont tracées par référence. Une recherche générale n'établit aucun lien avec le candidat, une fenêtre sans résultat ne prouve pas l'absence d'événement, et seule la date de publication mesure la fraîcheur de l'article.",
         }
         messages = [
             system_message,
@@ -2557,7 +3143,11 @@ def _budgeted_research_context(
                 "context_decomposition": decomposition,
             }
         failed_attempts.append(decomposition)
-        removable = next((market for market in reversed(selected) if market not in deepened), None)
+        removable = (
+            next((market for market in reversed(selected) if market not in deepened), None)
+            if not discovery_mode
+            else None
+        )
         if removable is None:
             break
         selected.remove(removable)
@@ -2575,6 +3165,11 @@ def _research_context_decomposition(
             key: payload.get(key) for key in ("objective", "limits", "read_only")
         },
         "scanner": payload.get("scanner_shortlist", []),
+        "market_universe": {
+            "summary": payload.get("market_universe"),
+            "pages": payload.get("market_catalog_pages", []),
+        },
+        "market_choice_reasons": payload.get("market_choice_reasons", {}),
         "previous_tool_results": payload.get("previous_tool_results", []),
         "evidence_registry": [
             row

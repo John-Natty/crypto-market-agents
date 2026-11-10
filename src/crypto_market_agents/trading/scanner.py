@@ -1,4 +1,4 @@
-"""Read-only discovery and transparent ranking of existing Bitvavo EUR markets."""
+"""Neutral Bitvavo market discovery and the optional deterministic scanner."""
 
 from __future__ import annotations
 
@@ -180,3 +180,224 @@ class BitvavoScanner:
             "rejected": [asdict(x) for x in rejected],
             "selection_order": "score décroissant, volume quote 24h EUR décroissant, marché alphabétique",
         }
+
+
+class BitvavoMarketDiscovery:
+    """Unranked, paginated observations for all Bitvavo EUR-quoted markets."""
+
+    def __init__(self, *, opener=None, now_provider=None, timeout=10, page_size=10):
+        if (
+            isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or not 1 <= page_size <= 25
+        ):
+            raise ValueError("page_size must be between 1 and 25")
+        self.scanner = BitvavoScanner(opener=opener, now_provider=now_provider, timeout=timeout)
+        self.page_size = page_size
+
+    def snapshot(self):
+        """Fetch the public EUR market universe without scoring or eligibility thresholds."""
+        markets = self.scanner._get("markets")
+        tickers = self.scanner._get("ticker/24h")
+        books = self.scanner._get("ticker/book")
+        if not isinstance(markets, list):
+            raise RuntimeError("Réponse markets Bitvavo invalide.")
+        tickers = self.scanner._indexed(tickers)
+        books = self.scanner._indexed(books)
+        collected_at = self.scanner.now_provider().astimezone(timezone.utc).isoformat()
+        rows = []
+        for item in markets:
+            if (
+                not isinstance(item, dict)
+                or item.get("quote") != "EUR"
+                or not isinstance(item.get("market"), str)
+                or not isinstance(item.get("base"), str)
+            ):
+                continue
+            market = item["market"]
+            ticker = tickers.get(market, {})
+            book = books.get(market, {})
+            ticker_time = _catalog_source_time(ticker.get("timestamp"))
+            observations = {
+                "base_asset": _catalog_observation(
+                    item.get("base"),
+                    "asset identifier",
+                    collected_at,
+                    None,
+                    "market_base_asset_absent",
+                ),
+                "quote_asset": _catalog_observation(
+                    item.get("quote"),
+                    "asset identifier",
+                    collected_at,
+                    None,
+                    "market_quote_asset_absent",
+                ),
+                "market_status": _catalog_observation(
+                    item.get("status"),
+                    "status",
+                    collected_at,
+                    None,
+                    "market_status_absent",
+                ),
+                "last": _catalog_observation(
+                    _catalog_positive(ticker.get("last")),
+                    "EUR per base asset",
+                    collected_at,
+                    ticker_time,
+                    "ticker_last_absent_or_invalid",
+                ),
+                "open_24h": _catalog_observation(
+                    _catalog_positive(ticker.get("open")),
+                    "EUR per base asset",
+                    collected_at,
+                    ticker_time,
+                    "ticker_open_absent_or_invalid",
+                ),
+                "price_change_24h_pct": _catalog_observation(
+                    _catalog_change_pct(ticker.get("open"), ticker.get("last")),
+                    "% over previous 24h",
+                    collected_at,
+                    ticker_time,
+                    "ticker_open_or_last_absent_or_invalid",
+                ),
+                "volume_base_24h": _catalog_observation(
+                    _catalog_nonnegative(ticker.get("volume")),
+                    item["base"],
+                    collected_at,
+                    ticker_time,
+                    "ticker_base_volume_absent_or_invalid",
+                ),
+                "volume_quote_24h": _catalog_observation(
+                    _catalog_nonnegative(ticker.get("volumeQuote")),
+                    "EUR",
+                    collected_at,
+                    ticker_time,
+                    "ticker_quote_volume_absent_or_invalid",
+                ),
+                "bid": _catalog_observation(
+                    _catalog_positive(book.get("bid")),
+                    "EUR per base asset",
+                    collected_at,
+                    None,
+                    "public_orderbook_bid_absent_or_invalid",
+                ),
+                "ask": _catalog_observation(
+                    _catalog_positive(book.get("ask")),
+                    "EUR per base asset",
+                    collected_at,
+                    None,
+                    "public_orderbook_ask_absent_or_invalid",
+                ),
+                "min_order_base": _catalog_observation(
+                    _catalog_positive(item.get("minOrderInBaseAsset")),
+                    item["base"],
+                    collected_at,
+                    None,
+                    "minimum_base_order_absent_or_invalid",
+                ),
+                "min_order_quote": _catalog_observation(
+                    _catalog_positive(item.get("minOrderInQuoteAsset")),
+                    "EUR",
+                    collected_at,
+                    None,
+                    "minimum_quote_order_absent_or_invalid",
+                ),
+            }
+            bid = observations["bid"]["value"]
+            ask = observations["ask"]["value"]
+            spread = None
+            spread_reason = "public_orderbook_bid_or_ask_unavailable"
+            if bid is not None and ask is not None:
+                bid_value, ask_value = Decimal(bid), Decimal(ask)
+                if bid_value <= ask_value:
+                    spread = str(
+                        ((ask_value - bid_value) / ((ask_value + bid_value) / 2) * 100).quantize(
+                            Decimal("0.0001")
+                        )
+                    )
+                    spread_reason = "public_orderbook_crossed"
+            observations["spread_pct"] = _catalog_observation(
+                spread,
+                "%",
+                collected_at,
+                None,
+                spread_reason,
+            )
+            rows.append(
+                {
+                    "market": market,
+                    "base_asset": item["base"],
+                    "quote_asset": "EUR",
+                    "status": item.get("status"),
+                    "collected_at": collected_at,
+                    "source_at": ticker_time,
+                    "observations": observations,
+                }
+            )
+
+        # Lexical market ID is a stable pagination key, not an investment ranking.
+        rows.sort(key=lambda row: row["market"])
+        pages = [
+            {
+                "page": page,
+                "items": rows[start : start + self.page_size],
+            }
+            for page, start in enumerate(range(0, len(rows), self.page_size))
+        ]
+        return {
+            "source": "Bitvavo public API",
+            "quote_currency": "EUR",
+            "collected_at": collected_at,
+            "ordering": "market identifier ascending; stable pagination only, no ranking",
+            "page_size": self.page_size,
+            "total_markets": len(rows),
+            "total_pages": len(pages),
+            "pages": pages,
+        }
+
+
+def _catalog_source_time(value):
+    try:
+        return _utc_ms(value).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _catalog_positive(value):
+    try:
+        return str(_decimal(value, "market observation"))
+    except ValueError:
+        return None
+
+
+def _catalog_nonnegative(value):
+    try:
+        if isinstance(value, bool):
+            return None
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or parsed < 0:
+            return None
+        return str(parsed)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _catalog_change_pct(open_value, last_value):
+    opened, last = _catalog_positive(open_value), _catalog_positive(last_value)
+    if opened is None or last is None:
+        return None
+    change = (Decimal(last) - Decimal(opened)) / Decimal(opened) * 100
+    return str(change.quantize(Decimal("0.0001")))
+
+
+def _catalog_observation(value, unit, collected_at, source_at, reason):
+    return {
+        "value": value,
+        "unit": unit,
+        "availability": "available" if value is not None else "unavailable",
+        "reason": None if value is not None else reason,
+        "collected_at": collected_at,
+        "source_at": source_at,
+        "source_timestamp_available": source_at is not None,
+    }

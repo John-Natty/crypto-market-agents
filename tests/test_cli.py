@@ -19,6 +19,75 @@ from crypto_market_agents.schemas import AgentReport, AgentStatus, RiskLevel
 
 
 class CLITests(unittest.TestCase):
+    def test_automatic_cycle_cli_passes_tracking_only_to_runner(self):
+        from crypto_market_agents.trading import automatic_cycle
+
+        captured = {}
+
+        class Runner:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def run(self, **kwargs):
+                return {"cycle_id": "fixture", "status": "no_open_positions", "stages": {}}
+
+        output = StringIO()
+        with (
+            patch.object(automatic_cycle, "AutomaticCycleRunner", Runner),
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "automatic-paper-cycle",
+                    "--state",
+                    "fixture-state.json",
+                    "--reports-dir",
+                    "fixture-reports",
+                    "--objective",
+                    "Track open positions",
+                    "--tracking-only",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIs(captured["tracking_only"], True)
+
+    def test_position_history_cli_passes_bounded_position_limit(self):
+        from crypto_market_agents.trading import proposal_cycle
+        from crypto_market_agents.trading.multi_asset import MultiAssetPaperStore
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "paper.json"
+            MultiAssetPaperStore(state).initialize()
+            captured = {}
+
+            def collect(portfolio, history_client, **kwargs):
+                captured.update(kwargs)
+                return {
+                    "schema_version": "autonomous-research.v6",
+                    "status": "no_open_positions",
+                    "budget": {"network_requests_used": 0},
+                }
+
+            with patch.object(proposal_cycle, "collect_position_history_report", collect):
+                code = main(
+                    [
+                        "position-history",
+                        "--state",
+                        str(state),
+                        "--reports-dir",
+                        str(root / "reports"),
+                        "--json",
+                        str(root / "history.json"),
+                        "--max-positions",
+                        "3",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(captured["limit"], 3)
+
     def test_cli_report_passes_simple_arguments(self):
         factory = RecordingFactory()
         output = StringIO()

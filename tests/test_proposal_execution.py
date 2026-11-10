@@ -79,6 +79,8 @@ def _fixture(markets=("BTC-EUR",), *, action="buy", portfolio=None, review_verdi
         "generated_at": NOW.isoformat(),
         "source_report_sha256": research_sha,
         "status": "completed",
+        "read_only": True,
+        "financial_action_executed": False,
         "review": {"candidates": review_rows},
     }
     review_sha = hashlib.sha256(json.dumps(review).encode()).hexdigest()
@@ -87,12 +89,18 @@ def _fixture(markets=("BTC-EUR",), *, action="buy", portfolio=None, review_verdi
         def chat_with_tools(self, messages, tools, **kwargs):
             target = json.loads(messages[1]["content"])["target_market"]
             ref = refs.get(target)
-            if action == "reduce":
-                ref = f"portfolio:bitvavo|{target}:position"
+            if action in {"reduce", "close", "hold"}:
+                refs_for_action = [
+                    item
+                    for item in (ref, f"portfolio:bitvavo|{target}:position")
+                    if item is not None
+                ]
+            else:
+                refs_for_action = [ref] if ref and action != "abstain" else []
             payload = {
                 "market": target,
                 "action": action,
-                "references": [ref] if action != "abstain" else [],
+                "references": refs_for_action,
                 "rationale": "Proposition étayée par les observations fournies.",
                 "horizon": "7 jours" if action == "buy" else "",
                 "invalidation_conditions": ["Réexaminer les preuves"] if action == "buy" else [],
@@ -112,6 +120,21 @@ def _fixture(markets=("BTC-EUR",), *, action="buy", portfolio=None, review_verdi
             bid = D("110") if action == "reduce" else D("100")
             return Quote(market, bid, bid + D("0.1"), NOW, D("5"), D("0.0001"), D("0"))
 
+    class HistoryClient:
+        def get_candles(self, market, *, interval, limit):
+            start = NOW - timedelta(hours=801)
+            return [
+                [
+                    int((start + timedelta(hours=index)).timestamp() * 1000),
+                    "100",
+                    "1000",
+                    "1",
+                    str(100 + index),
+                    "1",
+                ]
+                for index in range(800)
+            ]
+
     portfolio = portfolio or MultiAssetPortfolio.create()
     plan = run_proposal_cycle(
         research,
@@ -125,6 +148,7 @@ def _fixture(markets=("BTC-EUR",), *, action="buy", portfolio=None, review_verdi
         model="qwen3:8b",
         now_provider=lambda: NOW,
         quote_client=QuoteClient(),
+        history_client=HistoryClient(),
     )
     return plan, research, review, research_sha, review_sha
 
@@ -240,6 +264,49 @@ class ProposalExecutionTests(unittest.TestCase):
             self.assertLess(after.quantity, before.quantity)
             self.assertGreater(after_portfolio.realized_pnl_eur, D("0"))
             self.assertGreater(after_portfolio.fees_paid_eur, D("0"))
+
+    def test_close_executes_full_position_once_with_existing_trade_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MultiAssetPaperStore(Path(directory) / "portfolio.json")
+            store.initialize()
+            with store.transaction() as portfolio:
+                MultiAssetPaperEngine().execute(
+                    portfolio,
+                    MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "seed", amount_eur=D("50")),
+                    Quote("BTC-EUR", D("100"), D("100.1"), NOW, D("5"), D("0.0001")),
+                    "seed-buy",
+                    now=NOW,
+                )
+            quantity = store.load().positions["bitvavo|BTC-EUR"].quantity
+            plan, research, review, research_sha, review_sha = _fixture(
+                action="close", portfolio=store.load()
+            )
+            self.assertEqual(plan["proposals"][0]["status"], "accepted")
+            self.assertEqual(D(plan["proposals"][0]["quantity"]), quantity)
+            result = execute_proposal_cycle(
+                plan,
+                research,
+                review,
+                store,
+                research_sha256=research_sha,
+                review_sha256=review_sha,
+                now=NOW,
+            )
+            self.assertEqual(result["status"], "committed")
+            self.assertEqual(result["transaction_count"], 1)
+            self.assertEqual(result["transactions"][0]["action"], "close")
+            self.assertEqual(store.load().positions["bitvavo|BTC-EUR"].quantity, D("0"))
+            replay = execute_proposal_cycle(
+                plan,
+                research,
+                review,
+                store,
+                research_sha256=research_sha,
+                review_sha256=review_sha,
+                now=NOW,
+            )
+            self.assertTrue(replay["replayed"])
+            self.assertEqual(len(store.load().ledger), 2)  # one seed and one close
 
     def test_concurrent_launches_commit_once(self):
         with tempfile.TemporaryDirectory() as directory:

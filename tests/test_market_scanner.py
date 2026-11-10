@@ -11,7 +11,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from crypto_market_agents.cli import main
-from crypto_market_agents.trading.scanner import BitvavoScanner, ScanConfig
+from crypto_market_agents.trading.scanner import (
+    BitvavoMarketDiscovery,
+    BitvavoScanner,
+    ScanConfig,
+)
 
 
 def rows():
@@ -139,6 +143,45 @@ class ScannerTests(unittest.TestCase):
                     self.assertEqual(main(["scan", "--json", target]), 0)
                 self.assertIn("lecture seule", output.getvalue())
                 self.assertEqual(json.loads(Path(target).read_text()), result)
+
+    def test_paginated_market_discovery_is_unranked_and_reports_unavailable_observations(self):
+        payloads = iter([rows(), [ticker()], [book()]])
+
+        class Response:
+            def __init__(self, value):
+                self.value = json.dumps(value).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, n):
+                return self.value
+
+        discovery = BitvavoMarketDiscovery(
+            opener=lambda *_args, **_kwargs: Response(next(payloads)),
+            now_provider=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+            page_size=1,
+        )
+        snapshot = discovery.snapshot()
+        self.assertEqual(snapshot["total_markets"], 2)
+        self.assertEqual(snapshot["total_pages"], 2)
+        self.assertIn("no ranking", snapshot["ordering"])
+        first = snapshot["pages"][0]["items"][0]
+        second = snapshot["pages"][1]["items"][0]
+        self.assertEqual([first["market"], second["market"]], ["AAA-EUR", "BAD-EUR"])
+        self.assertNotIn("score", first)
+        self.assertEqual(first["observations"]["volume_quote_24h"]["value"], "2200")
+        self.assertEqual(first["observations"]["volume_quote_24h"]["unit"], "EUR")
+        self.assertTrue(first["observations"]["volume_quote_24h"]["source_at"])
+        self.assertEqual(second["status"], "halted")
+        self.assertEqual(second["observations"]["bid"]["availability"], "unavailable")
+        self.assertEqual(
+            second["observations"]["bid"]["reason"],
+            "public_orderbook_bid_absent_or_invalid",
+        )
 
 
 if __name__ == "__main__":

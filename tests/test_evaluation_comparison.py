@@ -188,6 +188,9 @@ class SnapshotAndValidationTests(unittest.TestCase):
         )
 
         candidate = analysis_report()["candidates"][0]
+        candidate["metrics"]["sma20_window_contiguous"] = True
+        candidate["metrics"]["sma50_window_contiguous"] = False
+        candidate["metrics"]["contiguous_interval_returns_used"] = 42
         candidate["metric_quality"]["returns_pct.24h"]["window"] = {
             "start_at": "2026-11-06T12:00:00+00:00",
             "end_at": "2026-11-07T12:00:00+00:00",
@@ -210,6 +213,9 @@ class SnapshotAndValidationTests(unittest.TestCase):
         ]
 
         facts = {item["metric"]: item for item in build_candidate_observations(candidate)}
+        self.assertNotIn("sma20_window_contiguous", facts)
+        self.assertNotIn("sma50_window_contiguous", facts)
+        self.assertNotIn("contiguous_interval_returns_used", facts)
         self.assertEqual(facts["returns_pct.24h"]["value"], "2")
         self.assertEqual(facts["returns_pct.24h"]["unit"], "percent")
         self.assertEqual(facts["returns_pct.24h"]["horizon"], "24h")

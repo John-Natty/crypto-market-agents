@@ -20,7 +20,12 @@ from crypto_market_agents.trading.multi_asset import (
     MultiAssetPaperStore,
     MultiAssetPortfolio,
 )
-from crypto_market_agents.trading.proposal_cycle import run_proposal_cycle
+from crypto_market_agents.trading.proposal_cycle import (
+    collect_position_history_report,
+    load_recent_position_history,
+    load_verified_entry_theses,
+    run_proposal_cycle,
+)
 from crypto_market_agents.cli import main
 
 
@@ -70,6 +75,8 @@ def inputs(*, collected_at=None, review_verdict="supported", rejected=None):
         "generated_at": NOW.isoformat(),
         "source_report_sha256": hashlib.sha256(raw).hexdigest(),
         "status": "partial" if rejected else "completed",
+        "read_only": True,
+        "financial_action_executed": False,
         "review": {
             "candidates": [
                 {
@@ -157,6 +164,26 @@ class Quotes:
         )
 
 
+class FakeHistoryClient:
+    def __init__(self):
+        self.calls = []
+
+    def get_candles(self, market, *, interval, limit):
+        self.calls.append((market, interval, limit))
+        start = NOW - timedelta(hours=801)
+        return [
+            [
+                int((start + timedelta(hours=index)).timestamp() * 1000),
+                "60000",
+                "70000",
+                "50000",
+                str(60000 + index),
+                "1",
+            ]
+            for index in range(800)
+        ]
+
+
 class ProposalCycleTests(unittest.TestCase):
     def run_cycle(
         self,
@@ -165,6 +192,7 @@ class ProposalCycleTests(unittest.TestCase):
         research=None,
         review=None,
         quote_client=None,
+        history_client=None,
         model_payload=None,
         portfolio=None,
     ):
@@ -186,8 +214,417 @@ class ProposalCycleTests(unittest.TestCase):
             model="qwen3:8b",
             now_provider=lambda: NOW,
             quote_client=quote_client or Quotes(),
+            history_client=history_client or FakeHistoryClient(),
         )
         return result, portfolio, before, model
+
+    def test_position_outside_discovery_gets_bounded_history_when_research_and_review_fail(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "ETH-EUR", "fixture position", amount_eur=D("20")),
+            Quote("ETH-EUR", D("2000"), D("2001"), NOW),
+            "fixture-seed-eth",
+            now=NOW,
+        )
+        research = {
+            "schema_version": "autonomous-research.v6",
+            "generated_at": NOW.isoformat(),
+            "status": "unavailable",
+            "research_status": "unavailable",
+            "read_only": True,
+            "financial_action_executed": False,
+            "conclusion": {"candidates": []},
+            "fact_ledger": {},
+            "missing_ledger": {},
+        }
+        research_hash = hashlib.sha256(json.dumps(research, sort_keys=True).encode()).hexdigest()
+        review = {
+            "schema_version": "research-contradiction-review.v3",
+            "generated_at": NOW.isoformat(),
+            "status": "unavailable",
+            "source_report_sha256": research_hash,
+            "read_only": True,
+            "financial_action_executed": False,
+            "review": None,
+        }
+
+        class History:
+            def __init__(self):
+                self.calls = []
+
+            def get_candles(self, market, *, interval, limit):
+                self.calls.append((market, interval, limit))
+                return [
+                    [
+                        int((NOW - timedelta(hours=61 - i)).timestamp() * 1000),
+                        "2000",
+                        "2010",
+                        "1990",
+                        str(2000 + i),
+                        "1",
+                    ]
+                    for i in range(60)
+                ]
+
+        history = History()
+        result, _, _, _ = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            model_payload=proposal("abstain", references=[], market="ETH-EUR"),
+            history_client=history,
+        )
+        tracking = result["position_tracking"]
+        self.assertEqual(history.calls, [("ETH-EUR", "1h", 1440)])
+        self.assertEqual(tracking["historical_analysis"]["ETH-EUR"]["status"], "collected")
+        self.assertGreater(tracking["historical_analysis"]["ETH-EUR"]["available_metric_count"], 0)
+        self.assertEqual(tracking["sources"]["research"], "unavailable")
+        self.assertEqual(tracking["sources"]["review"], "unavailable")
+        self.assertEqual(tracking["positions"][0]["status"], "incomplete")
+        self.assertIn("research_unavailable", tracking["positions"][0]["reason"])
+        self.assertIn("review_unavailable", tracking["positions"][0]["reason"])
+
+    def test_fresh_history_in_report_is_reused_without_another_candle_request(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "fixture-seed-btc",
+            now=NOW,
+        )
+        research, review, _, _ = inputs()
+        metrics = (
+            "returns_pct.24h",
+            "returns_pct.7d",
+            "returns_pct.30d",
+            "sma20_close",
+            "sma50_close",
+            "sma20_vs_sma50_pct",
+        )
+        for metric in metrics:
+            reference = f"history:BTC-EUR:{metric}"
+            research["fact_ledger"][reference] = {
+                "reference": reference,
+                "market": "BTC-EUR",
+                "source": "bitvavo_historical_analysis",
+                "collected_at": NOW.isoformat(),
+                "value": {
+                    "value": "1",
+                    "availability": "available",
+                    "freshness": {"fresh": True},
+                },
+            }
+            research["conclusion"]["candidates"][0]["fact_refs"].append(reference)
+        review["source_report_sha256"] = self.hashes(research, review)[0]
+
+        class NoCollection:
+            def get_candles(self, *_args, **_kwargs):
+                raise AssertionError("fresh history must be reused")
+
+        result, _, _, _ = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            action="hold",
+            model_payload=proposal("hold", references=[REF, "portfolio:bitvavo|BTC-EUR:position"]),
+            history_client=NoCollection(),
+        )
+        self.assertEqual(
+            result["position_tracking"]["historical_analysis"]["BTC-EUR"]["status"],
+            "reused_fresh_analysis",
+        )
+        self.assertEqual(
+            result["position_tracking"]["historical_analysis"]["BTC-EUR"]["network_requests"],
+            0,
+        )
+
+    def test_tracking_only_uses_fresh_history_without_discovery_review(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "tracking-only-seed",
+            now=NOW,
+        )
+        history_report = collect_position_history_report(
+            portfolio,
+            FakeHistoryClient(),
+            reports_dir=Path(tempfile.mkdtemp()),
+            now=NOW,
+        )
+        review = {
+            "schema_version": "research-contradiction-review.v3",
+            "generated_at": NOW.isoformat(),
+            "source_report_sha256": hashlib.sha256(
+                json.dumps(history_report, sort_keys=True).encode()
+            ).hexdigest(),
+            "status": "not_applicable",
+            "review_scope": "position_tracking_only",
+            "read_only": True,
+            "financial_action_executed": False,
+            "review": {"candidates": []},
+        }
+        research_bytes = json.dumps(history_report, sort_keys=True).encode()
+        review["source_report_sha256"] = hashlib.sha256(research_bytes).hexdigest()
+        model = FakeOllama(
+            proposal(
+                "hold",
+                market="BTC-EUR",
+                references=[
+                    "history:BTC-EUR:returns_pct.24h",
+                    "portfolio:bitvavo|BTC-EUR:position",
+                ],
+            )
+        )
+        before = portfolio.to_dict()
+        result = run_proposal_cycle(
+            history_report,
+            review,
+            portfolio,
+            model,
+            research_sha256=hashlib.sha256(research_bytes).hexdigest(),
+            review_sha256=hashlib.sha256(json.dumps(review, sort_keys=True).encode()).hexdigest(),
+            research_label="position-history.json",
+            review_label="not-applicable.json",
+            model="qwen3:8b",
+            now_provider=lambda: NOW,
+            quote_client=Quotes(),
+            position_tracking_only=True,
+        )
+        self.assertEqual(result["cycle_type"], "position_tracking_only")
+        self.assertEqual(result["position_tracking"]["positions"][0]["status"], "reviewed")
+        self.assertEqual(result["position_tracking"]["positions"][0]["action"], "hold")
+        self.assertEqual(result["position_tracking"]["sources"]["review"], "not_applicable")
+        self.assertEqual(portfolio.to_dict(), before)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_tracking_only_can_propose_reduce_or_close_without_discovery_review(self):
+        for action in ("reduce", "close"):
+            with self.subTest(action=action):
+                portfolio = MultiAssetPortfolio.create()
+                MultiAssetPaperEngine().execute(
+                    portfolio,
+                    MultiAssetOrder(
+                        "buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")
+                    ),
+                    Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+                    f"tracking-only-seed-{action}",
+                    now=NOW,
+                )
+                research = collect_position_history_report(
+                    portfolio,
+                    FakeHistoryClient(),
+                    reports_dir=Path(tempfile.mkdtemp()),
+                    now=NOW,
+                )
+                raw = json.dumps(research, sort_keys=True).encode()
+                review = {
+                    "schema_version": "research-contradiction-review.v3",
+                    "generated_at": NOW.isoformat(),
+                    "source_report_sha256": hashlib.sha256(raw).hexdigest(),
+                    "status": "not_applicable",
+                    "review_scope": "position_tracking_only",
+                    "read_only": True,
+                    "financial_action_executed": False,
+                    "review": {"candidates": []},
+                }
+                review_raw = json.dumps(review, sort_keys=True).encode()
+                model = FakeOllama(
+                    proposal(
+                        action,
+                        market="BTC-EUR",
+                        references=[
+                            "history:BTC-EUR:returns_pct.24h",
+                            "portfolio:bitvavo|BTC-EUR:position",
+                        ],
+                    )
+                )
+                result = run_proposal_cycle(
+                    research,
+                    review,
+                    portfolio,
+                    model,
+                    research_sha256=hashlib.sha256(raw).hexdigest(),
+                    review_sha256=hashlib.sha256(review_raw).hexdigest(),
+                    research_label="position-history.json",
+                    review_label="not-applicable.json",
+                    model="qwen3:8b",
+                    now_provider=lambda: NOW,
+                    quote_client=Quotes(),
+                    position_tracking_only=True,
+                )
+                self.assertEqual(result["proposals"][0]["status"], "accepted")
+                self.assertEqual(result["proposals"][0]["action"], action)
+                self.assertEqual(result["position_tracking"]["positions"][0]["status"], "reviewed")
+
+    def test_position_history_network_failure_is_specific_and_incomplete(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "tracking-network-failure-seed",
+            now=NOW,
+        )
+
+        class Offline:
+            def get_candles(self, *_args, **_kwargs):
+                raise TimeoutError("bounded public request timed out")
+
+        result = collect_position_history_report(
+            portfolio,
+            Offline(),
+            reports_dir=Path(tempfile.mkdtemp()),
+            now=NOW,
+        )
+        row = result["position_history"]["BTC-EUR"]
+        self.assertEqual(row["status"], "incomplete")
+        self.assertIn("TimeoutError", row["reason"])
+        self.assertEqual(row["network_requests"], 1)
+
+    def test_tracking_only_ollama_failure_is_incomplete_not_a_hold(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "tracking-llm-failure-seed",
+            now=NOW,
+        )
+        research = collect_position_history_report(
+            portfolio,
+            FakeHistoryClient(),
+            reports_dir=Path(tempfile.mkdtemp()),
+            now=NOW,
+        )
+        research_raw = json.dumps(research, sort_keys=True).encode()
+        review = {
+            "schema_version": "research-contradiction-review.v3",
+            "generated_at": NOW.isoformat(),
+            "source_report_sha256": hashlib.sha256(research_raw).hexdigest(),
+            "status": "not_applicable",
+            "review_scope": "position_tracking_only",
+            "read_only": True,
+            "financial_action_executed": False,
+            "review": {"candidates": []},
+        }
+        model = FakeOllama(error=RuntimeError("simulated local model outage"))
+        result = run_proposal_cycle(
+            research,
+            review,
+            portfolio,
+            model,
+            research_sha256=hashlib.sha256(research_raw).hexdigest(),
+            review_sha256=hashlib.sha256(json.dumps(review, sort_keys=True).encode()).hexdigest(),
+            research_label="position-history.json",
+            review_label="not-applicable.json",
+            model="qwen3:8b",
+            now_provider=lambda: NOW,
+            quote_client=Quotes(),
+            position_tracking_only=True,
+        )
+        row = result["position_tracking"]["positions"][0]
+        self.assertEqual(row["status"], "incomplete")
+        self.assertIsNone(row["action"])
+        self.assertNotEqual(row["suggested_action"], "hold")
+        self.assertNotEqual(result["decision_status"], "model_abstained")
+
+    def test_verified_fresh_history_cache_is_reused_and_stale_cache_is_refetched(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "tracking-cache-seed",
+            now=NOW,
+        )
+        refs = (
+            "returns_pct.24h",
+            "returns_pct.7d",
+            "returns_pct.30d",
+            "sma20_close",
+            "sma50_close",
+            "sma20_vs_sma50_pct",
+        )
+
+        def install_report(root, collected_at):
+            cycle_dir = root / "automatic-cycles" / ("a" * 32)
+            cycle_dir.mkdir(parents=True)
+            facts = {
+                f"history:BTC-EUR:{metric}": {
+                    "reference": f"history:BTC-EUR:{metric}",
+                    "market": "BTC-EUR",
+                    "source": "bitvavo_historical_analysis",
+                    "collected_at": collected_at.isoformat(),
+                    "value": {
+                        "value": "1",
+                        "availability": "available",
+                        "freshness": {"fresh": True},
+                    },
+                }
+                for metric in refs
+            }
+            report = {
+                "schema_version": "autonomous-research.v6",
+                "status": "completed",
+                "read_only": True,
+                "financial_action_executed": False,
+                "fact_ledger": facts,
+            }
+            raw = (json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+            (cycle_dir / "research.json").write_bytes(raw)
+            (cycle_dir / "cycle.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "automatic-paper-cycle.v1",
+                        "cycle_id": "a" * 32,
+                        "stages": {
+                            "research": {
+                                "status": "completed",
+                                "artifact": "research.json",
+                                "sha256": hashlib.sha256(raw).hexdigest(),
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install_report(root, NOW)
+            self.assertEqual(len(load_recent_position_history(root, portfolio, now=NOW)), 6)
+
+            class History(FakeHistoryClient):
+                pass
+
+            history = History()
+            result = collect_position_history_report(
+                portfolio,
+                history,
+                reports_dir=root,
+                now=NOW,
+            )
+            self.assertEqual(history.calls, [])
+            self.assertEqual(
+                result["position_history"]["BTC-EUR"]["status"], "reused_fresh_analysis"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install_report(root, NOW - timedelta(hours=7))
+            history = FakeHistoryClient()
+            result = collect_position_history_report(
+                portfolio,
+                history,
+                reports_dir=root,
+                now=NOW,
+            )
+            self.assertEqual(history.calls, [("BTC-EUR", "1h", 1440)])
+            self.assertEqual(result["position_history"]["BTC-EUR"]["status"], "collected")
 
     @staticmethod
     def hashes(research, review):
@@ -230,6 +667,411 @@ class ProposalCycleTests(unittest.TestCase):
                 ).encode()
             ).hexdigest(),
         )
+
+    def test_open_position_missing_from_scanner_gets_motivated_hold_without_invented_thesis(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "ETH-EUR", "seed", amount_eur=D("20")),
+            Quote("ETH-EUR", D("2000"), D("2001"), NOW),
+            "seed-eth",
+            now=NOW,
+        )
+        held_ref = "portfolio:bitvavo|ETH-EUR:position"
+        model_payload = {
+            "ETH-EUR": {
+                **proposal("hold", references=[held_ref], market="ETH-EUR"),
+                "rationale": "La cotation est valide et aucun fait disponible ne montre une invalidation.",
+            },
+            "BTC-EUR": proposal("abstain", references=[], market="BTC-EUR"),
+        }
+        result, _, before, model = self.run_cycle(portfolio=portfolio, model_payload=model_payload)
+        follow = result["position_tracking"]["positions"][0]
+        context = json.loads(model.calls[0][0][1]["content"])
+        self.assertEqual(context["target_market"], "ETH-EUR")
+        self.assertEqual(
+            context["target_position"][0]["cost_basis_eur"],
+            str(portfolio.positions["bitvavo|ETH-EUR"].cost_basis_eur),
+        )
+        self.assertEqual(context["target_position"][0]["entry_thesis"], {"status": "not_recorded"})
+        self.assertEqual(follow["status"], "incomplete")
+        self.assertIsNone(follow["action"])
+        self.assertEqual(follow["suggested_action"], "hold")
+        self.assertIn("aucun fait disponible", follow["rationale"])
+        self.assertEqual(follow["source_status"], "not_in_discovery_shortlist")
+        self.assertEqual(follow["entry_thesis_status"], "not_found")
+        self.assertIsNone(follow["entry_thesis"])
+        self.assertEqual(portfolio.to_dict(), before)
+
+    def test_held_scanner_candidate_consumes_tracking_not_discovery_generation_budget(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "ETH-EUR", "seed", amount_eur=D("20")),
+            Quote("ETH-EUR", D("2000"), D("2001"), NOW),
+            "seed-eth",
+            now=NOW,
+        )
+        research, review, _, _ = inputs()
+        research["conclusion"]["candidates"][0]["market"] = "ETH-EUR"
+        research["fact_ledger"][REF]["market"] = "ETH-EUR"
+        review["review"]["candidates"][0]["market"] = "ETH-EUR"
+        review["source_report_sha256"] = self.hashes(research, review)[0]
+        held_ref = "portfolio:bitvavo|ETH-EUR:position"
+        result, _, _, model = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            model_payload=proposal(
+                "hold",
+                references=[REF, held_ref],
+                market="ETH-EUR",
+            ),
+        )
+        call = result["generation"]["calls"][0]
+        self.assertEqual(call["target_type"], "position_tracking")
+        self.assertEqual(call["num_predict"], 384)
+        self.assertEqual(result["position_tracking"]["budget"]["generated_tokens"], 80)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_missing_required_source_evidence_makes_hold_suggestion_incomplete(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "seed", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "seed-btc",
+            now=NOW,
+        )
+        research, review, _, _ = inputs(review_verdict="insufficient")
+        research["status"] = "partial"
+        research["conclusion"]["candidates"][0]["status"] = "partial"
+        research["conclusion"]["candidates"][0]["required_missing_refs"] = [
+            "missing:BTC-EUR:holder_concentration"
+        ]
+        research["conclusion"]["candidates"][0]["missing_refs"] = [
+            "missing:BTC-EUR:holder_concentration"
+        ]
+        research["missing_ledger"]["missing:BTC-EUR:holder_concentration"] = {
+            "market": "BTC-EUR",
+            "reason": "provider_data_unavailable",
+        }
+        review["source_report_sha256"] = self.hashes(research, review)[0]
+        held_ref = "portfolio:bitvavo|BTC-EUR:position"
+        result, _, _, _ = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            model_payload={
+                "BTC-EUR": {
+                    **proposal("hold", references=[held_ref]),
+                    "rationale": "La position est observée mais une donnée requise manque.",
+                },
+                "BTC-EUR-discovery": proposal("abstain"),
+            },
+        )
+        follow = result["position_tracking"]["positions"][0]
+        self.assertEqual(follow["status"], "incomplete")
+        self.assertIsNone(follow["action"])
+        self.assertEqual(follow["suggested_action"], "hold")
+        self.assertEqual(follow["missing_references"], ["missing:BTC-EUR:holder_concentration"])
+
+    def test_failed_research_and_unavailable_review_still_run_incomplete_position_follow_up(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "fixture-seed-btc",
+            now=NOW,
+        )
+        research = {
+            "schema_version": "autonomous-research.v6",
+            "generated_at": NOW.isoformat(),
+            "status": "unavailable",
+            "research_status": "unavailable",
+            "read_only": True,
+            "financial_action_executed": False,
+            "conclusion": {"candidates": []},
+            "fact_ledger": {},
+            "missing_ledger": {},
+        }
+        research_hash = hashlib.sha256(json.dumps(research, sort_keys=True).encode()).hexdigest()
+        review = {
+            "schema_version": "research-contradiction-review.v3",
+            "generated_at": NOW.isoformat(),
+            "status": "unavailable",
+            "source_report_sha256": research_hash,
+            "read_only": True,
+            "financial_action_executed": False,
+            "review": None,
+        }
+        result, _, _, model = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            model_payload=proposal("hold", references=["portfolio:bitvavo|BTC-EUR:position"]),
+        )
+        follow = result["position_tracking"]["positions"][0]
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(
+            result["position_tracking"]["sources"],
+            {
+                "research": "unavailable",
+                "review": "unavailable",
+            },
+        )
+        self.assertEqual(follow["status"], "incomplete")
+        self.assertIsNone(follow["action"])
+        self.assertEqual(follow["suggested_action"], "hold")
+        self.assertIn("research_unavailable", follow["reason"])
+        self.assertIn("review_unavailable", follow["reason"])
+        self.assertEqual(result["proposals"][0]["status"], "not_evaluated")
+        self.assertEqual(result["technical_status"], "partial")
+
+    def test_empty_discovery_still_calls_model_for_open_position(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "fixture-seed-btc",
+            now=NOW,
+        )
+        research, review, _, _ = inputs()
+        research["conclusion"]["candidates"] = []
+        review["review"]["candidates"] = []
+        review["source_report_sha256"] = self.hashes(research, review)[0]
+        result, _, _, model = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            model_payload=proposal("hold", references=[REF, "portfolio:bitvavo|BTC-EUR:position"]),
+        )
+        follow = result["position_tracking"]["positions"][0]
+        context = json.loads(model.calls[0][0][1]["content"])
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(context["target_market"], "BTC-EUR")
+        self.assertEqual(
+            context["research_review"][0]["research_status"], "not_in_discovery_shortlist"
+        )
+        self.assertEqual(follow["status"], "incomplete")
+        self.assertEqual(follow["suggested_action"], "hold")
+        self.assertIn("position_not_in_current_research_scope", follow["reason"])
+
+    def test_optional_missing_evidence_is_visible_without_blocking_position_follow_up(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "seed", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "seed-btc",
+            now=NOW,
+        )
+        research, review, _, _ = inputs()
+        research["conclusion"]["candidates"][0]["missing_refs"] = ["missing:BTC-EUR:optional"]
+        research["missing_ledger"]["missing:BTC-EUR:optional"] = {
+            "market": "BTC-EUR",
+            "reason": "optional_source_not_configured",
+        }
+        review["source_report_sha256"] = self.hashes(research, review)[0]
+        result, _, _, model = self.run_cycle(
+            portfolio=portfolio,
+            research=research,
+            review=review,
+            model_payload=proposal("hold", references=[REF, "portfolio:bitvavo|BTC-EUR:position"]),
+        )
+        follow = result["position_tracking"]["positions"][0]
+        self.assertEqual(follow["status"], "reviewed")
+        self.assertEqual(follow["action"], "hold")
+        self.assertEqual(follow["missing_references"], ["missing:BTC-EUR:optional"])
+        self.assertIn("missing:BTC-EUR:optional", model.calls[0][0][1]["content"])
+
+    def test_stale_position_quote_makes_follow_up_incomplete_not_hold(self):
+        portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "seed", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "seed-btc",
+            now=NOW,
+        )
+        result, _, _, _ = self.run_cycle(
+            portfolio=portfolio,
+            model_payload=proposal("hold", references=["portfolio:bitvavo|BTC-EUR:position"]),
+            quote_client=Quotes(timestamp=NOW - timedelta(seconds=500)),
+        )
+        follow = result["position_tracking"]["positions"][0]
+        self.assertEqual(follow["status"], "incomplete")
+        self.assertEqual(follow["proposal_status"], "not_evaluated")
+        self.assertIn("quote", follow["reason"])
+
+    def test_position_can_be_reduced_or_closed_with_existing_risk_limits(self):
+        for action, amount, follow_bid in (
+            ("reduce", D("60"), "120000"),
+            ("close", D("20"), "60000"),
+        ):
+            with self.subTest(action=action):
+                portfolio = MultiAssetPortfolio.create()
+                engine = MultiAssetPaperEngine()
+                engine.execute(
+                    portfolio,
+                    MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "seed", amount_eur=amount),
+                    Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+                    "seed-btc",
+                    now=NOW,
+                )
+                original_quantity = portfolio.positions["bitvavo|BTC-EUR"].quantity
+                result, _, before, _ = self.run_cycle(
+                    portfolio=portfolio,
+                    model_payload=proposal(
+                        action,
+                        references=[REF, "portfolio:bitvavo|BTC-EUR:position"],
+                    ),
+                    quote_client=Quotes(bid=follow_bid, ask=str(D(follow_bid) + 1)),
+                )
+                plan = result["proposals"][0]
+                self.assertEqual(plan["status"], "accepted")
+                self.assertEqual(plan["action"], action)
+                if action == "close":
+                    self.assertEqual(D(plan["quantity"]), original_quantity)
+                else:
+                    self.assertLess(D(plan["quantity"]), original_quantity)
+                self.assertEqual(portfolio.to_dict(), before)
+
+    def test_valid_position_reduction_survives_another_position_quote_failure(self):
+        portfolio = MultiAssetPortfolio.create()
+        engine = MultiAssetPaperEngine()
+        for market, price in (("BTC-EUR", "60000"), ("ETH-EUR", "2000")):
+            engine.execute(
+                portfolio,
+                MultiAssetOrder("buy", "bitvavo", market, "seed", amount_eur=D("20")),
+                Quote(market, D(price), D(price) + 1, NOW),
+                f"seed-{market}",
+                now=NOW,
+            )
+        result, _, _, _ = self.run_cycle(
+            portfolio=portfolio,
+            model_payload={
+                "BTC-EUR": proposal(
+                    "reduce", references=[REF, "portfolio:bitvavo|BTC-EUR:position"]
+                ),
+                "ETH-EUR": proposal("hold", references=["portfolio:bitvavo|ETH-EUR:position"]),
+            },
+            quote_client=Quotes(fail=("ETH-EUR",)),
+        )
+        plans = {row["market"]: row for row in result["proposals"]}
+        tracking = {row["market"]: row for row in result["position_tracking"]["positions"]}
+        self.assertEqual(plans["BTC-EUR"]["status"], "accepted")
+        self.assertEqual(plans["BTC-EUR"]["action"], "reduce")
+        self.assertEqual(tracking["BTC-EUR"]["status"], "reviewed")
+        self.assertEqual(tracking["ETH-EUR"]["status"], "incomplete")
+        quote_rows = {row["market"]: row for row in result["quote_observations"]}
+        self.assertEqual(quote_rows["BTC-EUR"]["status"], "available")
+        self.assertEqual(quote_rows["ETH-EUR"]["status"], "unavailable")
+
+    def test_position_budget_is_separate_and_overflow_is_not_a_hold(self):
+        portfolio = MultiAssetPortfolio.create()
+        engine = MultiAssetPaperEngine()
+        for index in range(11):
+            market = f"COIN{index:02d}-EUR"
+            engine.execute(
+                portfolio,
+                MultiAssetOrder("buy", "bitvavo", market, "seed", amount_eur=D("8")),
+                Quote(market, D("100"), D("100.01"), NOW),
+                f"seed-{index}",
+                now=NOW,
+            )
+        model_payload = {
+            f"COIN{index:02d}-EUR": proposal(
+                "hold",
+                references=[f"portfolio:bitvavo|COIN{index:02d}-EUR:position"],
+                market=f"COIN{index:02d}-EUR",
+            )
+            for index in range(10)
+        }
+        model_payload["BTC-EUR"] = proposal("abstain", references=[])
+        result, _, _, model = self.run_cycle(portfolio=portfolio, model_payload=model_payload)
+        tracking = result["position_tracking"]
+        self.assertEqual(tracking["status"], "partial")
+        self.assertEqual(tracking["budget"]["selected_positions"], 10)
+        self.assertEqual(tracking["budget"]["omitted_positions"], 1)
+        omitted = next(row for row in tracking["positions"] if row["status"] == "not_evaluated")
+        self.assertEqual(omitted["reason"], "position_tracking_budget_exhausted")
+        self.assertEqual(len(model.calls), 11)
+
+    def test_entry_thesis_loaded_only_from_committed_hash_verified_purchase(self):
+        portfolio = MultiAssetPortfolio.create()
+        proposal_cycle_id = "a" * 24
+        decision_id = f"proposal-cycle:{proposal_cycle_id}:ETH-EUR"
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder(
+                "buy", "bitvavo", "ETH-EUR", "seed", amount_eur=D("20"), provider="proposal_cycle"
+            ),
+            Quote("ETH-EUR", D("2000"), D("2001"), NOW),
+            decision_id,
+            now=NOW,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reports = Path(temp_dir)
+            cycle_dir = reports / "automatic-cycles" / ("b" * 32)
+            cycle_dir.mkdir(parents=True)
+            proposal_report = {
+                "schema_version": "paper-proposal-cycle.v3",
+                "cycle_id": proposal_cycle_id,
+                "read_only": True,
+                "financial_action_executed": False,
+                "proposals": [
+                    {
+                        "market": "ETH-EUR",
+                        "action": "buy",
+                        "status": "accepted",
+                        "rationale": "Thèse consignée à l'entrée.",
+                        "references": ["scan:ETH-EUR:price_change_24h_pct"],
+                        "horizon": "30 jours",
+                        "invalidation_conditions": ["Fait nouveau qui contredit la thèse"],
+                    }
+                ],
+            }
+            execution_report = {
+                "status": "committed",
+                "transactions": [
+                    {
+                        "decision_id": decision_id,
+                        "market": "ETH-EUR",
+                        "action": "buy",
+                        "status": "executed",
+                    }
+                ],
+            }
+            proposal_path = cycle_dir / "proposal.json"
+            execution_path = cycle_dir / "execution.json"
+            proposal_path.write_text(json.dumps(proposal_report, indent=2) + "\n")
+            execution_path.write_text(json.dumps(execution_report, indent=2) + "\n")
+            manifest = {
+                "schema_version": "automatic-paper-cycle.v1",
+                "cycle_id": "b" * 32,
+                "stages": {
+                    "proposal": {
+                        "status": "completed",
+                        "artifact": "proposal.json",
+                        "sha256": hashlib.sha256(proposal_path.read_bytes()).hexdigest(),
+                    },
+                    "execution": {
+                        "status": "completed",
+                        "artifact": "execution.json",
+                        "sha256": hashlib.sha256(execution_path.read_bytes()).hexdigest(),
+                    },
+                },
+            }
+            (cycle_dir / "cycle.json").write_text(json.dumps(manifest, indent=2) + "\n")
+            thesis = load_verified_entry_theses(reports, portfolio)["bitvavo|ETH-EUR"]
+            self.assertEqual(thesis["status"], "verified")
+            self.assertEqual(thesis["rationale"], "Thèse consignée à l'entrée.")
+
+            execution_path.write_text('{"status":"committed","transactions":[]}')
+            self.assertEqual(load_verified_entry_theses(reports, portfolio), {})
 
     def test_multiple_unique_markets_reserve_shared_cash_and_exposure(self):
         research, review, _, _ = inputs()
@@ -446,8 +1288,8 @@ class ProposalCycleTests(unittest.TestCase):
                 f"seed-{market}",
                 now=NOW,
             )
-        # A held-position reference is enough to reduce without requesting a new purchase thesis.
-        model_payload = proposal("reduce", references=["portfolio:bitvavo|BTC-EUR:position"])
+        # A fresh market fact plus the held-position reference is enough; no new entry thesis is required.
+        model_payload = proposal("reduce", references=[REF, "portfolio:bitvavo|BTC-EUR:position"])
         result, _, before, _ = self.run_cycle(
             portfolio=portfolio, quote_client=Quotes(fail={"ETH-EUR"}), model_payload=model_payload
         )
@@ -465,6 +1307,13 @@ class ProposalCycleTests(unittest.TestCase):
         model = FakeOllama(error=TimeoutError())
         client = Quotes()
         portfolio = MultiAssetPortfolio.create()
+        MultiAssetPaperEngine().execute(
+            portfolio,
+            MultiAssetOrder("buy", "bitvavo", "BTC-EUR", "seed", amount_eur=D("20")),
+            Quote("BTC-EUR", D("60000"), D("60001"), NOW),
+            "seed-btc",
+            now=NOW,
+        )
         before = portfolio.to_dict()
         result = run_proposal_cycle(
             research,
@@ -483,6 +1332,10 @@ class ProposalCycleTests(unittest.TestCase):
         self.assertNotEqual(result["decision_status"], "model_abstained")
         self.assertEqual(result["model_response_status"], "invalid")
         self.assertEqual(client.calls, [])
+        self.assertEqual(result["position_tracking"]["status"], "partial")
+        self.assertEqual(result["position_tracking"]["positions"][0]["status"], "incomplete")
+        self.assertNotEqual(result["position_tracking"]["positions"][0]["action"], "hold")
+        self.assertIsNone(result["position_tracking"]["positions"][0]["action"])
         self.assertEqual(portfolio.to_dict(), before)
 
     def test_cli_writes_a_separate_report_without_touching_portfolio(self):

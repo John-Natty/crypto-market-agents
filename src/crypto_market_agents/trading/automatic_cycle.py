@@ -15,6 +15,12 @@ from typing import Any, Callable, Iterator, Sequence
 
 from crypto_market_agents.http_utils import http_request_budget
 from .multi_asset import MultiAssetPaperStore
+from .proposal_cycle import (
+    MAX_CYCLE_SECONDS as PROPOSAL_CYCLE_SECONDS,
+    MAX_DISCOVERY_MARKETS,
+    MAX_QUOTE_MARKETS,
+    MAX_TRACKED_POSITIONS,
+)
 
 AUTO_SCHEMA = "automatic-paper-cycle.v1"
 STAGES = ("research", "review", "proposal", "execution")
@@ -175,13 +181,14 @@ class AutomaticCycleRunner:
         enable_paper_execution: bool = False,
         enable_gnews: bool = False,
         confirm_gnews_free_plan: bool = False,
-        cycle_timeout_seconds: int = 600,
+        cycle_timeout_seconds: int = 800,
         cycle_limits: dict[str, int] | None = None,
         daily_limits: dict[str, int] | None = None,
         daily_budget_path: str | Path | None = None,
         research_limits: dict[str, int] | None = None,
         review_limits: dict[str, int] | None = None,
         proposal_limits: dict[str, int] | None = None,
+        tracking_only: bool = False,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         monotonic: Callable[[], float] = time.monotonic,
     ):
@@ -193,12 +200,13 @@ class AutomaticCycleRunner:
         self.enable_paper_execution = enable_paper_execution
         self.enable_gnews = enable_gnews
         self.confirm_gnews_free_plan = confirm_gnews_free_plan
+        self.tracking_only = tracking_only
         self.cycle_timeout_seconds = cycle_timeout_seconds
         self.cycle_limits = cycle_limits or {
-            "llm_calls": 20,
-            "generation_tokens": 12000,
-            "external_tool_calls": 25,
-            "http_requests": 100,
+            "llm_calls": 30,
+            "generation_tokens": 16000,
+            "external_tool_calls": 30,
+            "http_requests": 120,
         }
         self.daily_limits = daily_limits or {
             "duration_seconds": 3600,
@@ -232,7 +240,9 @@ class AutomaticCycleRunner:
         self.proposal_limits = proposal_limits or {
             "timeout": 60,
             "num_predict": 800,
-            "total_num_predict": 4000,
+            "tracking_num_predict": 384,
+            "max_tracked_positions": MAX_TRACKED_POSITIONS,
+            "total_num_predict": 8192,
         }
         self.now = now
         self.monotonic = monotonic
@@ -276,28 +286,53 @@ class AutomaticCycleRunner:
         if not (
             1 <= self.proposal_limits["timeout"] <= 90
             and 128 <= self.proposal_limits["num_predict"] <= 1200
-            and self.proposal_limits["num_predict"]
-            <= self.proposal_limits["total_num_predict"]
+            and 128 <= self.proposal_limits["tracking_num_predict"] <= 1200
+            and 1 <= self.proposal_limits["max_tracked_positions"] <= MAX_TRACKED_POSITIONS
+            and self.proposal_limits["total_num_predict"]
+            >= self.proposal_limits["num_predict"] * MAX_DISCOVERY_MARKETS
+            + self.proposal_limits["tracking_num_predict"]
+            * self.proposal_limits["max_tracked_positions"]
             <= 8192
         ):
             raise ValueError("proposal_budget_out_of_range")
         minimum_cycle = {
-            "llm_calls": self.research_limits["max_tool_calls"] + 2 + 1 + 5,
+            "llm_calls": (
+                self.proposal_limits["max_tracked_positions"]
+                if self.tracking_only
+                else self.research_limits["max_tool_calls"]
+                + 2
+                + 1
+                + MAX_DISCOVERY_MARKETS
+                + self.proposal_limits["max_tracked_positions"]
+            ),
             "generation_tokens": (
-                self.research_limits["total_num_predict"]
+                self.proposal_limits["tracking_num_predict"]
+                * self.proposal_limits["max_tracked_positions"]
+                if self.tracking_only
+                else self.research_limits["total_num_predict"]
                 + self.review_limits["num_predict"]
                 + self.proposal_limits["total_num_predict"]
             ),
-            "external_tool_calls": self.research_limits["max_tool_calls"] + 5,
-            "http_requests": 90,
+            "external_tool_calls": (
+                self.proposal_limits["max_tracked_positions"]
+                if self.tracking_only
+                else self.research_limits["max_tool_calls"] + MAX_QUOTE_MARKETS
+            ),
+            "http_requests": (
+                3 * self.proposal_limits["max_tracked_positions"]
+                if self.tracking_only
+                else 80 + 2 * MAX_QUOTE_MARKETS + MAX_TRACKED_POSITIONS
+            ),
         }
         insufficient = [
             key for key, required in minimum_cycle.items() if self.cycle_limits[key] < required
         ]
         required_seconds = (
-            self.research_limits["timeout"]
+            90 + PROPOSAL_CYCLE_SECONDS + (10 if enable_paper_execution else 0)
+            if self.tracking_only
+            else self.research_limits["timeout"]
             + self.review_limits["timeout"]
-            + 180
+            + PROPOSAL_CYCLE_SECONDS
             + (10 if enable_paper_execution else 0)
         )
         if insufficient or self.cycle_timeout_seconds < required_seconds:
@@ -305,6 +340,8 @@ class AutomaticCycleRunner:
             raise ValueError(f"cycle_budget_cannot_fund_configured_stages:{details}")
         if enable_gnews and not confirm_gnews_free_plan:
             raise ValueError("gnews_free_plan_confirmation_required")
+        if self.tracking_only and enable_gnews:
+            raise ValueError("gnews_not_used_by_position_tracking_only")
 
     def run(
         self,
@@ -315,6 +352,15 @@ class AutomaticCycleRunner:
         with _cycle_lock(self.state):
             started = self.monotonic()
             cycle_dir, manifest = self._load_or_create(resume)
+            if self.tracking_only and not any(
+                position.quantity > 0
+                for position in MultiAssetPaperStore(self.state).load().positions.values()
+            ):
+                manifest["status"] = "no_open_positions"
+                manifest["stop_reason"] = "tracking_only_empty_portfolio"
+                manifest["elapsed_seconds"] = round(self.monotonic() - started, 3)
+                self._save_manifest(cycle_dir, manifest)
+                return manifest
             ledger = DailyBudget(
                 self.daily_budget_path,
                 self.daily_limits,
@@ -325,6 +371,37 @@ class AutomaticCycleRunner:
             current_stage = None
             try:
                 for stage in STAGES:
+                    if self.tracking_only and stage == "review":
+                        prior = manifest["stages"].get(stage, {})
+                        if prior.get("status") == "not_applicable":
+                            _, digest = _read_json(cycle_dir / prior["artifact"])
+                            if digest != prior.get("sha256"):
+                                raise AutomaticCycleError("resume_review_artifact_hash_mismatch")
+                            continue
+                        research, research_hash = _read_json(cycle_dir / "research.json")
+                        review_path = cycle_dir / "review.json"
+                        review = {
+                            "schema_version": "research-contradiction-review.v3",
+                            "generated_at": self.now().astimezone(timezone.utc).isoformat(),
+                            "source_report_sha256": research_hash,
+                            "status": "not_applicable",
+                            "review_scope": "position_tracking_only",
+                            "read_only": True,
+                            "financial_action_executed": False,
+                            "review": {"candidates": []},
+                        }
+                        digest = _write_new_json(review_path, review)
+                        manifest["stages"][stage] = {
+                            "status": "not_applicable",
+                            "artifact": review_path.name,
+                            "sha256": digest,
+                            "outcome": {
+                                "status": "not_applicable",
+                                "reason": "position_tracking_only",
+                            },
+                        }
+                        self._save_manifest(cycle_dir, manifest)
+                        continue
                     if stage == "execution" and not self.enable_paper_execution:
                         manifest["stages"][stage] = {
                             "status": "disabled_by_default",
@@ -335,6 +412,11 @@ class AutomaticCycleRunner:
                         self._save_manifest(cycle_dir, manifest)
                         break
                     existing = manifest["stages"].get(stage, {})
+                    if existing.get("status") == "not_applicable":
+                        report, digest = _read_json(cycle_dir / existing["artifact"])
+                        if digest != existing.get("sha256"):
+                            raise AutomaticCycleError(f"resume_{stage}_artifact_hash_mismatch")
+                        continue
                     if existing.get("status") == "completed":
                         self._verify_saved_stage(cycle_dir, stage, existing)
                         outcome = existing.get("outcome", {})
@@ -383,7 +465,7 @@ class AutomaticCycleRunner:
                         manifest["status"] = "budget_exhausted"
                         manifest["stop_reason"] = "insufficient_time_for_bounded_research_stage"
                         break
-                    if stage == "proposal" and remaining < 180:
+                    if stage == "proposal" and remaining < PROPOSAL_CYCLE_SECONDS:
                         manifest["status"] = "budget_exhausted"
                         manifest["stop_reason"] = "insufficient_time_for_bounded_proposal_stage"
                         break
@@ -433,11 +515,15 @@ class AutomaticCycleRunner:
                     self._save_manifest(cycle_dir, manifest)
                     stage_started = self.monotonic()
                     http_usage = {"used": 0}
+                    invocation_error = None
                     try:
                         with http_request_budget(
                             usage_reserve.get("http_requests", 0)
                         ) as http_usage:
                             code = 0 if path.is_file() else self.invoke(argv)
+                    except Exception as exc:
+                        code = 1
+                        invocation_error = f"{stage}_invocation_failed:{type(exc).__name__}"
                     except BaseException:
                         self._record_http_attempts(
                             ledger,
@@ -450,6 +536,8 @@ class AutomaticCycleRunner:
                             recovered_artifact,
                         )
                         raise
+                    if code and invocation_error is None:
+                        invocation_error = f"{stage}_returned_exit_{code}"
                     self._record_http_attempts(
                         ledger,
                         manifest,
@@ -468,6 +556,14 @@ class AutomaticCycleRunner:
                             receipt = receipt_entry.get("result") if receipt_entry else None
                             if receipt is not None:
                                 _write_new_json(path, receipt)
+                        elif stage in {"research", "review"}:
+                            invocation_error = invocation_error or (
+                                f"{stage}_failed_without_report_exit_{code}"
+                            )
+                            _write_new_json(
+                                path,
+                                self._stage_failure_report(stage, cycle_dir, invocation_error),
+                            )
                         if not path.is_file():
                             raise AutomaticCycleError(f"{stage}_failed_without_report_exit_{code}")
                     report, digest = _read_json(path)
@@ -484,6 +580,15 @@ class AutomaticCycleRunner:
                         ),
                     }
                     outcome = self._validate_stage(stage, report, manifest, cycle_dir)
+                    if (
+                        invocation_error
+                        and stage in {"research", "review"}
+                        and report.get("status") not in {"partial", "unavailable", "error"}
+                    ):
+                        outcome = {
+                            "status": "technical_error",
+                            "reason": invocation_error,
+                        }
                     if (
                         stage == "proposal"
                         and self._current_portfolio_revision()
@@ -510,6 +615,7 @@ class AutomaticCycleRunner:
                         "artifact": path.name,
                         "sha256": digest,
                         "outcome": outcome,
+                        **({"invocation_error": invocation_error} if invocation_error else {}),
                     }
                     actual_usage = {
                         "duration_seconds": actual_duration,
@@ -620,6 +726,7 @@ class AutomaticCycleRunner:
                 manifest.get("model") != self.model
                 or manifest.get("objective") != self.objective
                 or manifest.get("execution_explicitly_enabled") is not self.enable_paper_execution
+                or manifest.get("tracking_only", False) is not self.tracking_only
                 or manifest.get("gnews_enabled") is not self.enable_gnews
                 or manifest.get("budgets") != expected_budgets
                 or manifest.get("daily_budget_ledger_path") != str(self.daily_budget_path.resolve())
@@ -646,6 +753,8 @@ class AutomaticCycleRunner:
             "model": self.model,
             "objective": self.objective,
             "execution_explicitly_enabled": self.enable_paper_execution,
+            "tracking_only": self.tracking_only,
+            "cycle_type": "position_tracking_only" if self.tracking_only else "full_discovery",
             "gnews_enabled": self.enable_gnews,
             "budgets": {
                 "cycle_duration_seconds": self.cycle_timeout_seconds,
@@ -714,6 +823,20 @@ class AutomaticCycleRunner:
 
     def _stage_argv(self, stage, directory, output, remaining):
         if stage == "research":
+            if self.tracking_only:
+                return [
+                    "position-history",
+                    "--state",
+                    str(self.state),
+                    "--reports-dir",
+                    str(self.reports_dir),
+                    "--json",
+                    str(output),
+                    "--max-positions",
+                    str(self.proposal_limits["max_tracked_positions"]),
+                    "--request-timeout",
+                    "8",
+                ]
             args = [
                 "research",
                 "--objective",
@@ -757,7 +880,7 @@ class AutomaticCycleRunner:
                 str(self.review_limits["num_predict"]),
             ]
         if stage == "proposal":
-            return [
+            args = [
                 "proposal-cycle",
                 "--research-json",
                 str(directory / "research.json"),
@@ -773,9 +896,18 @@ class AutomaticCycleRunner:
                 str(min(self.proposal_limits["timeout"], remaining)),
                 "--num-predict",
                 str(self.proposal_limits["num_predict"]),
+                "--tracking-num-predict",
+                str(self.proposal_limits["tracking_num_predict"]),
+                "--max-tracked-positions",
+                str(self.proposal_limits["max_tracked_positions"]),
                 "--total-num-predict",
                 str(self.proposal_limits["total_num_predict"]),
+                "--history-reports-dir",
+                str(self.reports_dir),
             ]
+            if self.tracking_only:
+                args.append("--position-tracking-only")
+            return args
         return [
             "execute-proposal-cycle",
             "--plan-json",
@@ -814,7 +946,7 @@ class AutomaticCycleRunner:
             if report.get("status") in {"unavailable", "error"}:
                 return {
                     "status": "review_unavailable",
-                    "terminal": True,
+                    "terminal": False,
                     "reason": report.get("status"),
                 }
             return {
@@ -822,7 +954,7 @@ class AutomaticCycleRunner:
                 "review_status": report.get("status"),
             }
         if stage == "proposal":
-            if report.get("schema_version") != "paper-proposal-cycle.v2" or not isinstance(
+            if report.get("schema_version") != "paper-proposal-cycle.v3" or not isinstance(
                 report.get("proposals"), list
             ):
                 return {"status": "technical_error", "reason": "proposal_contract_invalid"}
@@ -834,6 +966,35 @@ class AutomaticCycleRunner:
                 or source_reports.get("review", {}).get("sha256") != review_hash
             ):
                 return {"status": "technical_error", "reason": "proposal_source_hash_mismatch"}
+            accepted = [
+                row
+                for row in report["proposals"]
+                if isinstance(row, dict) and row.get("status") == "accepted"
+            ]
+            if (
+                research.get("status") in {"unavailable", "error"}
+                or review.get("status") in {"unavailable", "error"}
+            ) and any(row.get("action") == "buy" for row in accepted):
+                return {
+                    "status": "technical_error",
+                    "reason": "proposal_entry_accepted_without_available_research_and_review",
+                }
+            tracking = report.get("position_tracking", {})
+            tracking_rows = tracking.get("positions", []) if isinstance(tracking, dict) else []
+            incomplete_markets = {
+                row.get("market")
+                for row in tracking_rows
+                if isinstance(row, dict) and row.get("status") != "reviewed"
+            }
+            if any(
+                row.get("market") in incomplete_markets
+                and row.get("action") in {"hold", "reduce", "close"}
+                for row in accepted
+            ):
+                return {
+                    "status": "technical_error",
+                    "reason": "position_plan_accepted_with_incomplete_follow_up",
+                }
             if report.get("technical_status") not in {"completed", "partial"}:
                 return {
                     "status": "proposal_rejected",
@@ -847,7 +1008,8 @@ class AutomaticCycleRunner:
                     row.get("status") == "accepted" for row in report["proposals"]
                 ),
                 "terminal": not any(
-                    row.get("status") == "accepted" and row.get("action") in {"buy", "reduce"}
+                    row.get("status") == "accepted"
+                    and row.get("action") in {"buy", "reduce", "close"}
                     for row in report["proposals"]
                 ),
                 "reason": report.get("decision_status"),
@@ -892,20 +1054,46 @@ class AutomaticCycleRunner:
         return 0, 0, 0
 
     def _stage_reserve(self, stage, remaining, remaining_http_requests):
+        if self.tracking_only:
+            positions = self._tracking_position_count()
+            durations = {
+                "research": 90,
+                "review": 0,
+                "proposal": PROPOSAL_CYCLE_SECONDS,
+                "execution": 10,
+            }
+            return {
+                "duration_seconds": min(remaining, durations[stage]),
+                "llm_calls": positions if stage == "proposal" else 0,
+                "generation_tokens": (
+                    positions * self.proposal_limits["tracking_num_predict"]
+                    if stage == "proposal"
+                    else 0
+                ),
+                "external_tool_calls": positions if stage == "proposal" else 0,
+                "http_requests": min(
+                    remaining_http_requests,
+                    positions
+                    if stage == "research"
+                    else 2 * positions
+                    if stage == "proposal"
+                    else 0,
+                ),
+            }
         return {
             "duration_seconds": min(
                 remaining,
                 {
                     "research": self.research_limits["timeout"],
                     "review": self.review_limits["timeout"],
-                    "proposal": 180,
+                    "proposal": PROPOSAL_CYCLE_SECONDS,
                     "execution": 10,
                 }[stage],
             ),
             "llm_calls": {
                 "research": self.research_limits["max_tool_calls"] + 2,
                 "review": 1,
-                "proposal": 5,
+                "proposal": MAX_DISCOVERY_MARKETS + self.proposal_limits["max_tracked_positions"],
                 "execution": 0,
             }[stage],
             "generation_tokens": {
@@ -917,16 +1105,55 @@ class AutomaticCycleRunner:
             "external_tool_calls": {
                 "research": self.research_limits["max_tool_calls"],
                 "review": 0,
-                "proposal": 5,
+                "proposal": MAX_QUOTE_MARKETS,
                 "execution": 0,
             }[stage],
             "http_requests": min(
                 remaining_http_requests,
-                {"research": 80, "review": 0, "proposal": 10, "execution": 0}[stage],
+                {
+                    "research": 80,
+                    "review": 0,
+                    "proposal": 2 * MAX_QUOTE_MARKETS + MAX_TRACKED_POSITIONS,
+                    "execution": 0,
+                }[stage],
             ),
         }
 
+    def _tracking_position_count(self):
+        portfolio = MultiAssetPaperStore(self.state).load()
+        open_count = sum(position.quantity > 0 for position in portfolio.positions.values())
+        return min(open_count, self.proposal_limits["max_tracked_positions"])
+
     def _stage_budget_record(self, stage, remaining, reservation):
+        if self.tracking_only:
+            if stage == "research":
+                generation = {"total_tokens": 0, "llm_calls": 0}
+                timeouts = {
+                    "stage_seconds": reservation["duration_seconds"],
+                    "per_request_seconds": 8,
+                    "max_positions": self.proposal_limits["max_tracked_positions"],
+                }
+            elif stage == "proposal":
+                generation = {
+                    "per_position_tokens": self.proposal_limits["tracking_num_predict"],
+                    "max_positions": self.proposal_limits["max_tracked_positions"],
+                    "total_tokens": reservation["generation_tokens"],
+                }
+                timeouts = {
+                    "stage_seconds": reservation["duration_seconds"],
+                    "requested_per_call_seconds": self.proposal_limits["timeout"],
+                    "effective_per_call_seconds": "divided among open positions after quote reserve",
+                }
+            else:
+                generation = {"total_tokens": 0}
+                timeouts = {"stage_seconds": reservation["duration_seconds"]}
+            return {
+                "llm_calls": reservation["llm_calls"],
+                "generation": generation,
+                "external_tool_calls": reservation["external_tool_calls"],
+                "http_requests": reservation["http_requests"],
+                "duration": timeouts,
+            }
         generation = {
             "research": {
                 "per_call_tokens": self.research_limits["num_predict"],
@@ -939,6 +1166,9 @@ class AutomaticCycleRunner:
             },
             "proposal": {
                 "per_market_tokens": self.proposal_limits["num_predict"],
+                "per_position_tokens": self.proposal_limits["tracking_num_predict"],
+                "max_tracked_positions": self.proposal_limits["max_tracked_positions"],
+                "max_discovery_candidates": MAX_DISCOVERY_MARKETS,
                 "total_tokens": self.proposal_limits["total_num_predict"],
             },
             "execution": {"total_tokens": 0},
@@ -951,7 +1181,7 @@ class AutomaticCycleRunner:
             },
             "review": {"stage_seconds": min(self.review_limits["timeout"], remaining)},
             "proposal": {
-                "stage_seconds": 180,
+                "stage_seconds": PROPOSAL_CYCLE_SECONDS,
                 "requested_per_call_seconds": self.proposal_limits["timeout"],
                 "effective_per_call_seconds": "dynamically divided after quote reserve",
             },
@@ -964,6 +1194,43 @@ class AutomaticCycleRunner:
             "http_requests": reservation["http_requests"],
             "duration": timeouts,
         }
+
+    def _stage_failure_report(self, stage, cycle_dir, reason):
+        generated_at = self.now().astimezone(timezone.utc).isoformat()
+        if stage == "research":
+            return {
+                "schema_version": "autonomous-research.v6",
+                "generated_at": generated_at,
+                "status": "unavailable",
+                "research_status": "unavailable",
+                **({"cycle_mode": "position_tracking_only"} if self.tracking_only else {}),
+                "stop_reason": reason,
+                "read_only": True,
+                "financial_action_executed": False,
+                "conclusion": {"candidates": []},
+                "fact_ledger": {},
+                "missing_ledger": {},
+                "budget": {
+                    "ollama_turns": 0,
+                    "generation_tokens_reported": 0,
+                    "tool_calls_used": 0,
+                },
+                "errors": [reason],
+            }
+        if stage == "review":
+            _, source_hash = _read_json(cycle_dir / "research.json")
+            return {
+                "schema_version": "research-contradiction-review.v3",
+                "generated_at": generated_at,
+                "status": "unavailable",
+                "source_report_sha256": source_hash,
+                "read_only": True,
+                "financial_action_executed": False,
+                "review": None,
+                "generation": {"eval_count": 0},
+                "errors": [reason],
+            }
+        raise AutomaticCycleError("failure_artifact_stage_unsupported")
 
     def _record_http_attempts(
         self,

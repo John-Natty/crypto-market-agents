@@ -35,7 +35,7 @@ from .proposal_cycle import (
 )
 
 EXECUTION_SCHEMA = "proposal-cycle-execution.v1"
-_ACTION_PRIORITY = {"reduce": 0, "buy": 1, "hold": 2, "abstain": 3}
+_ACTION_PRIORITY = {"close": 0, "reduce": 1, "buy": 2, "hold": 3, "abstain": 4}
 
 
 class ProposalExecutionRejected(ValueError):
@@ -133,7 +133,7 @@ def execute_proposal_cycle(
                 seen_markets.add(market)
 
             quote_markets = {
-                row["market"] for row in accepted if row.get("action") in {"buy", "reduce"}
+                row["market"] for row in accepted if row.get("action") in {"buy", "reduce", "close"}
             }
             if any(row.get("action") == "buy" for row in accepted):
                 quote_markets.update(
@@ -207,6 +207,22 @@ def execute_proposal_cycle(
                         f"proposal-cycle:{cycle_id}:{content_sha256[:16]}",
                         provider="proposal_cycle",
                         quantity=requested_quantity,
+                    )
+                elif action == "close":
+                    held = [
+                        position
+                        for position in working.positions.values()
+                        if position.market == plan["market"] and position.quantity > 0
+                    ]
+                    if len(held) != 1:
+                        raise ProposalExecutionRejected("execution_reduction_position_ambiguous")
+                    order = MultiAssetOrder(
+                        "sell",
+                        held[0].platform,
+                        plan["market"],
+                        f"proposal-cycle:{cycle_id}:{content_sha256[:16]}",
+                        provider="proposal_cycle",
+                        quantity=held[0].quantity,
                     )
                 else:
                     raise ProposalExecutionRejected("execution_accepted_action_invalid")
@@ -419,9 +435,9 @@ def _load_fresh_quotes(report, portfolio, now, required_markets):
 
 def _revalidate_accepted_plan(plan, candidates, reviews, facts, portfolio, now):
     action = plan.get("action")
-    if action not in {"buy", "reduce", "hold"}:
+    if action not in {"buy", "reduce", "close", "hold"}:
         raise ProposalExecutionRejected("execution_accepted_action_invalid")
-    if action in {"buy", "reduce"} and plan.get("reasons") != [
+    if action in {"buy", "reduce", "close"} and plan.get("reasons") != [
         "multi_asset_engine_preview_accepted"
     ]:
         raise ProposalExecutionRejected("execution_plan_acceptance_reason_invalid")

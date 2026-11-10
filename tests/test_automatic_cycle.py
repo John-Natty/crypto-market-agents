@@ -4,11 +4,15 @@ from pathlib import Path
 import threading
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from crypto_market_agents.trading.automatic_cycle import AutomaticCycleRunner, run_repeating
-from crypto_market_agents.trading.multi_asset import MultiAssetPaperStore
+from crypto_market_agents.trading.multi_asset import (
+    MultiAssetOrder,
+    MultiAssetPaperEngine,
+    MultiAssetPaperStore,
+)
 from crypto_market_agents.trading.models import Quote
 from crypto_market_agents.trading.proposal_cycle import run_proposal_cycle
 from crypto_market_agents.trading.proposal_execution import execute_proposal_cycle
@@ -95,7 +99,7 @@ def _mock_stages(tmp_path, *, terminal=False, fail_at=None, mutate_at=None):
             _dump(
                 output,
                 {
-                    "schema_version": "paper-proposal-cycle.v2",
+                    "schema_version": "paper-proposal-cycle.v3",
                     "technical_status": "completed",
                     "model_response_status": "valid",
                     "decision_status": "abstained" if terminal else "plans_ready",
@@ -155,6 +159,8 @@ class AutomaticCycleTests(unittest.TestCase):
         research_args = runner._stage_argv(
             "research", self.tmp_path, self.tmp_path / "research.json", 600
         )
+        self.assertEqual(research_args[0], "research")
+        self.assertNotIn("--scan-json", research_args)
         review_args = runner._stage_argv(
             "review", self.tmp_path, self.tmp_path / "review.json", 600
         )
@@ -174,8 +180,39 @@ class AutomaticCycleTests(unittest.TestCase):
         self.assertEqual(option(review_args, "--num-predict"), "900")
         self.assertEqual(option(proposal_args, "--timeout"), "60")
         self.assertEqual(option(proposal_args, "--num-predict"), "800")
-        self.assertEqual(option(proposal_args, "--total-num-predict"), "4000")
-        self.assertLessEqual(6000 + 900 + 4000, runner.cycle_limits["generation_tokens"])
+        self.assertEqual(option(proposal_args, "--tracking-num-predict"), "384")
+        self.assertEqual(option(proposal_args, "--max-tracked-positions"), "10")
+        self.assertEqual(option(proposal_args, "--total-num-predict"), "8192")
+        self.assertEqual(runner.cycle_limits["generation_tokens"], 16000)
+        self.assertEqual(runner.daily_limits["generation_tokens"], 30000)
+        stage_reserves = {
+            stage: runner._stage_reserve(stage, 800, 120)
+            for stage in ("research", "review", "proposal", "execution")
+        }
+        self.assertEqual(sum(row["generation_tokens"] for row in stage_reserves.values()), 15092)
+        self.assertEqual(sum(row["llm_calls"] for row in stage_reserves.values()), 28)
+        self.assertEqual(sum(row["external_tool_calls"] for row in stage_reserves.values()), 25)
+        self.assertEqual(sum(row["http_requests"] for row in stage_reserves.values()), 120)
+        self.assertEqual(sum(row["duration_seconds"] for row in stage_reserves.values()), 770)
+        worst_case = {
+            "generation_tokens": 15092,
+            "llm_calls": 28,
+            "external_tool_calls": 25,
+            "http_requests": 120,
+            "duration_seconds": 770,
+        }
+        for key, amount in worst_case.items():
+            cycle_limit_key = "duration_seconds" if key == "duration_seconds" else key
+            self.assertLessEqual(amount, runner.daily_limits[cycle_limit_key])
+            if key != "duration_seconds":
+                self.assertLessEqual(amount, runner.cycle_limits[key])
+        self.assertEqual(runner.cycle_timeout_seconds, 800)
+        self.assertEqual(runner.daily_limits["duration_seconds"], 3600)
+        self.assertEqual(runner.daily_limits["llm_calls"], 60)
+        self.assertEqual(runner.daily_limits["external_tool_calls"], 100)
+        self.assertEqual(runner.daily_limits["http_requests"], 500)
+        self.assertEqual(stage_reserves["execution"]["generation_tokens"], 0)
+        self.assertEqual(stage_reserves["execution"]["llm_calls"], 0)
         self.assertEqual(
             runner._stage_budget_record(
                 "research", 600, runner._stage_reserve("research", 600, 100)
@@ -185,16 +222,19 @@ class AutomaticCycleTests(unittest.TestCase):
 
     def test_http_count_is_persisted_even_when_stage_raises(self):
         tmp_path = self.tmp_path
+        invoke, _, _ = _mock_stages(tmp_path)
 
-        def failing_stage(_args):
-            _consume_http_request_budget()
-            raise RuntimeError("simulated failure after HTTP request")
+        def failing_stage(argv):
+            if argv[0] == "proposal-cycle":
+                _consume_http_request_budget()
+                raise RuntimeError("simulated failure after HTTP request")
+            return invoke(argv)
 
         runner = _runner(tmp_path, failing_stage)
         result = runner.run()
         cycle_dir = tmp_path / "reports" / "automatic-cycles" / result["cycle_id"]
         manifest = json.loads((cycle_dir / "cycle.json").read_text())
-        stage = manifest["stages"]["research"]
+        stage = manifest["stages"]["proposal"]
         self.assertEqual(result["status"], "technical_error")
         self.assertEqual(stage["status"], "technical_error")
         self.assertEqual(stage["http_requests_used"], 1)
@@ -485,6 +525,185 @@ class AutomaticCycleTests(unittest.TestCase):
         assert "execute-proposal-cycle" not in calls
         assert result["stages"]["execution"]["status"] == "disabled_by_default"
 
+    def test_tracking_only_empty_portfolio_finishes_without_stage_or_budget_calls(self):
+        tmp_path = self.tmp_path
+        calls = []
+        runner = _runner(
+            tmp_path,
+            lambda argv: calls.append(argv[0]) or 0,
+            tracking_only=True,
+        )
+        result = runner.run()
+        self.assertEqual(result["status"], "no_open_positions")
+        self.assertEqual(result["cycle_type"], "position_tracking_only")
+        self.assertEqual(calls, [])
+        self.assertFalse((tmp_path / "daily-budget.json").exists())
+
+    def test_tracking_only_resumes_without_repeating_history_or_model(self):
+        from crypto_market_agents.trading.proposal_cycle import collect_position_history_report
+
+        tmp_path = self.tmp_path
+        state = tmp_path / "paper.json"
+        store = MultiAssetPaperStore(state)
+        store.initialize()
+        with store.transaction() as portfolio:
+            MultiAssetPaperEngine().execute(
+                portfolio,
+                MultiAssetOrder(
+                    "buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=Decimal("20")
+                ),
+                Quote("BTC-EUR", Decimal("60000"), Decimal("60001"), datetime.now(timezone.utc)),
+                "tracking-only-seed",
+                now=datetime.now(timezone.utc),
+            )
+        before = store.load().to_dict()
+        calls = []
+
+        class CandleClient:
+            def __init__(self):
+                self.calls = 0
+
+            def get_candles(self, market, *, interval, limit):
+                self.calls += 1
+                now = datetime.now(timezone.utc)
+                start = now - timedelta(hours=801)
+                return [
+                    [
+                        int((start + timedelta(hours=index)).timestamp() * 1000),
+                        "60000",
+                        "70000",
+                        "50000",
+                        str(60000 + index),
+                        "1",
+                    ]
+                    for index in range(800)
+                ]
+
+        candle = CandleClient()
+
+        class Model:
+            def chat_with_tools(self, messages, tools, **kwargs):
+                market = json.loads(messages[1]["content"])["target_market"]
+                payload = {
+                    "market": market,
+                    "action": "abstain",
+                    "references": [],
+                    "rationale": "Les preuves ne justifient pas une action.",
+                    "horizon": "",
+                    "invalidation_conditions": [],
+                }
+                return {
+                    "message": {"content": json.dumps(payload), "tool_calls": []},
+                    "done_reason": "stop",
+                    "think": False,
+                    "generation": {"eval_count": 40, "prompt_eval_count": 300},
+                    "duration_ms": 5,
+                    "request_bytes": 500,
+                    "response_bytes": 300,
+                }
+
+        class QuoteClient:
+            def get_quote(self, market):
+                return Quote(market, Decimal("60000"), Decimal("60001"), datetime.now(timezone.utc))
+
+        def invoke(argv):
+            calls.append(argv[0])
+            output = Path(argv[argv.index("--json") + 1])
+            directory = output.parent
+            if argv[0] == "position-history":
+                report = collect_position_history_report(
+                    store.load(),
+                    candle,
+                    reports_dir=tmp_path / "reports",
+                    now=datetime.now(timezone.utc),
+                )
+                _dump(output, report)
+            elif argv[0] == "proposal-cycle":
+                research_raw = (directory / "research.json").read_bytes()
+                review_raw = (directory / "review.json").read_bytes()
+                report = run_proposal_cycle(
+                    json.loads(research_raw),
+                    json.loads(review_raw),
+                    store.load(),
+                    Model(),
+                    research_sha256=hashlib.sha256(research_raw).hexdigest(),
+                    review_sha256=hashlib.sha256(review_raw).hexdigest(),
+                    research_label="research.json",
+                    review_label="review.json",
+                    model="fake",
+                    now_provider=lambda: datetime.now(timezone.utc),
+                    quote_client=QuoteClient(),
+                    position_tracking_only=True,
+                )
+                _dump(output, report)
+            else:
+                raise AssertionError(f"unexpected stage: {argv[0]}")
+            return 0
+
+        runner = AutomaticCycleRunner(
+            state=state,
+            reports_dir=tmp_path / "reports",
+            invoke=invoke,
+            objective="Suivi des positions détenues",
+            enable_paper_execution=True,
+            tracking_only=True,
+            daily_budget_path=tmp_path / "daily-budget.json",
+        )
+        result = runner.run()
+        self.assertEqual(calls, ["position-history", "proposal-cycle"])
+        self.assertEqual(candle.calls, 1)
+        self.assertEqual(result["cycle_type"], "position_tracking_only")
+        self.assertEqual(result["status"], "model_abstained")
+        self.assertEqual(result["stages"]["review"]["status"], "not_applicable")
+        self.assertEqual(store.load().to_dict(), before)
+        cycle_dir = tmp_path / "reports" / "automatic-cycles" / result["cycle_id"]
+        resumed = runner.run(resume=cycle_dir)
+        self.assertEqual(resumed["status"], result["status"])
+        self.assertEqual(calls, ["position-history", "proposal-cycle"])
+        self.assertEqual(candle.calls, 1)
+        self.assertEqual(store.load().to_dict(), before)
+
+    def test_tracking_only_cycle_lock_rejects_a_concurrent_run(self):
+        tmp_path = self.tmp_path
+        state = tmp_path / "paper.json"
+        store = MultiAssetPaperStore(state)
+        store.initialize()
+        with store.transaction() as portfolio:
+            MultiAssetPaperEngine().execute(
+                portfolio,
+                MultiAssetOrder(
+                    "buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=Decimal("20")
+                ),
+                Quote("BTC-EUR", Decimal("60000"), Decimal("60001"), datetime.now(timezone.utc)),
+                "tracking-lock-seed",
+                now=datetime.now(timezone.utc),
+            )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked(argv):
+            self.assertEqual(argv[0], "position-history")
+            entered.set()
+            release.wait(3)
+            raise KeyboardInterrupt
+
+        runner = AutomaticCycleRunner(
+            state=state,
+            reports_dir=tmp_path / "reports",
+            invoke=blocked,
+            objective="Suivi des positions",
+            tracking_only=True,
+            daily_budget_path=tmp_path / "daily-budget.json",
+        )
+        thread = threading.Thread(target=runner.run)
+        thread.start()
+        self.assertTrue(entered.wait(2))
+        with self.assertRaisesRegex(RuntimeError, "cycle_already_running"):
+            runner.run()
+        release.set()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+
     def test_abstention_and_review_unavailable_do_not_execute(self):
         tmp_path = self.tmp_path
         invoke, calls, _ = _mock_stages(tmp_path, terminal=True)
@@ -501,13 +720,99 @@ class AutomaticCycleTests(unittest.TestCase):
                 value = json.loads(path.read_text())
                 value["status"] = "unavailable"
                 _dump(path, value)
+            if argv[0] == "proposal-cycle":
+                path = Path(argv[argv.index("--json") + 1])
+                value = json.loads(path.read_text())
+                value["technical_status"] = "partial"
+                value["decision_status"] = "plans_rejected"
+                value["proposals"] = [
+                    {
+                        "market": "BTC-EUR",
+                        "action": "hold",
+                        "status": "not_evaluated",
+                        "reasons": ["position_follow_up_evidence_incomplete"],
+                    }
+                ]
+                value["position_tracking"] = {
+                    "status": "partial",
+                    "positions": [
+                        {
+                            "market": "BTC-EUR",
+                            "status": "incomplete",
+                            "suggested_action": "hold",
+                        }
+                    ],
+                }
+                _dump(path, value)
             return code
 
         other = tmp_path / "other"
         other.mkdir()
         result = _runner(other, unavailable).run()
-        assert result["status"] == "review_unavailable"
-        assert "proposal-cycle" not in calls
+        assert result["status"] == "plans_rejected"
+        assert "proposal-cycle" in calls
+        assert "execute-proposal-cycle" not in calls
+
+    def test_research_failure_without_artifact_still_runs_incomplete_position_tracking(self):
+        tmp_path = self.tmp_path
+        invoke, calls, _ = _mock_stages(tmp_path)
+
+        def continue_tracking(argv):
+            if argv[0] == "research":
+                raise TimeoutError("simulated research outage")
+            code = invoke(argv)
+            if argv[0] == "proposal-cycle":
+                path = Path(argv[argv.index("--json") + 1])
+                value = json.loads(path.read_text())
+                value["technical_status"] = "partial"
+                value["decision_status"] = "plans_rejected"
+                value["proposals"] = [
+                    {
+                        "market": "BTC-EUR",
+                        "action": "hold",
+                        "status": "not_evaluated",
+                        "reasons": ["position_follow_up_evidence_incomplete"],
+                    }
+                ]
+                value["position_tracking"] = {
+                    "status": "partial",
+                    "positions": [
+                        {
+                            "market": "BTC-EUR",
+                            "status": "incomplete",
+                            "suggested_action": "hold",
+                        }
+                    ],
+                }
+                _dump(path, value)
+            return code
+
+        runner = _runner(tmp_path, continue_tracking)
+        store = MultiAssetPaperStore(tmp_path / "paper.json")
+        now = datetime.now(timezone.utc)
+        with store.transaction() as portfolio:
+            MultiAssetPaperEngine().execute(
+                portfolio,
+                MultiAssetOrder(
+                    "buy", "bitvavo", "BTC-EUR", "fixture position", amount_eur=Decimal("20")
+                ),
+                Quote("BTC-EUR", Decimal("60000"), Decimal("60001"), now),
+                "fixture-seed-btc",
+                now=now,
+            )
+        before = store.load().to_dict()
+        result = runner.run()
+        cycle_dir = tmp_path / "reports" / "automatic-cycles" / result["cycle_id"]
+        manifest = json.loads((cycle_dir / "cycle.json").read_text())
+        research = json.loads((cycle_dir / "research.json").read_text())
+        assert research["status"] == "unavailable"
+        assert manifest["stages"]["research"]["invocation_error"].startswith(
+            "research_invocation_failed:TimeoutError"
+        )
+        assert result["status"] == "plans_rejected"
+        assert calls == ["review-research", "proposal-cycle"]
+        assert "execute-proposal-cycle" not in calls
+        assert store.load().to_dict() == before
 
     def test_intermediate_failure_is_technical_and_never_executes(self):
         tmp_path = self.tmp_path
@@ -585,10 +890,10 @@ class AutomaticCycleTests(unittest.TestCase):
                 tmp_path,
                 lambda _args: 0,
                 cycle_limits={
-                    "llm_calls": 20,
-                    "generation_tokens": 10000,
-                    "external_tool_calls": 25,
-                    "http_requests": 100,
+                    "llm_calls": 30,
+                    "generation_tokens": 12000,
+                    "external_tool_calls": 30,
+                    "http_requests": 120,
                 },
             )
 

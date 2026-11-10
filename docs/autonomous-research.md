@@ -1,10 +1,9 @@
 # Recherche autonome en lecture seule
 
-La commande `research` lance une boucle de recherche locale et bornée. Le
-scanner fournit une présélection, puis Ollama choisit à chaque tour un seul
-outil autorisé en fonction de l'objectif et des observations déjà reçues. Le
-programme n'impose donc pas une collecte historique et fondamentale pour
-chaque candidat.
+La commande `research` lance une boucle locale bornée à partir du catalogue
+public des marchés Bitvavo en EUR. Elle ne lance pas le scanner et ne reçoit
+aucune liste de favoris. Ollama choisit les pages et marchés à approfondir,
+puis les outils historiques, fondamentaux et d'actualité utiles à l'objectif.
 
 ```bash
 crypto-market-agents research \
@@ -20,13 +19,40 @@ Ollama est local (`127.0.0.1:11434`); CoinGecko utilise le chemin gratuit
 existant, avec son cache et ses délais. Aucune clé payante, aucun abonnement
 et aucun service d'ordre ne sont nécessaires.
 
+Le catalogue comprend uniquement les marchés cotés en EUR annoncés par
+l'endpoint public `markets` de Bitvavo. Les observations regroupées viennent
+des endpoints publics `ticker/24h` et `ticker/book`. Chaque marché indique le
+statut, les prix, volumes, spread et minimums d'ordre disponibles, avec unités,
+date locale de collecte, date source quand Bitvavo la fournit, et motif précis
+pour les champs indisponibles. Les cours de carnet n'ont pas d'horodatage
+source dans cet endpoint; l'heure de collecte n'est pas présentée comme heure
+de transaction.
+
+Les marchés EUR sont paginés par identifiant de marché croissant, avec dix
+marchés par page. Cet ordre est une clé stable de pagination, pas un classement.
+Aucun score, seuil de volume ou spread, statut de négociation ou performance
+passée ne filtre les marchés présentés. Le modèle voit la première page, puis
+peut demander d'autres pages avec `list_market_page`; chaque demande doit
+conserver un motif bref. Le rapport donne le nombre total de marchés, les pages
+consultées et celles non consultées. Une recherche terminée sur quelques pages
+ne signifie pas que tout le catalogue a été étudié. L'univers ne comprend pas
+automatiquement les actifs sans marché EUR Bitvavo, les autres plateformes ni
+les marchés décentralisés.
+
+La commande `scan` reste disponible séparément pour une présélection
+déterministe facultative; `research` et `automatic-paper-cycle` n'utilisent
+pas son classement.
+
 ## Outils que le modèle peut demander
 
-- `analyze_candidate`: analyse historique d'un marché de la présélection.
+- `list_market_page`: consulter une page neutre du catalogue EUR et choisir
+  quelles pistes explorer ensuite.
+- `analyze_candidate`: demander l'analyse historique d'un marché déjà
+  consulté dans une page.
 - `get_fundamentals`: dossier factuel d'identité, CoinGecko et éventuelle
   correspondance DefiLlama vérifiée.
 - `get_market_news`: flux RSS/Atom généraux configurés, associés aux références
-  d'un candidat de la présélection pour son bilan.
+  d'un marché consulté pour le bilan.
 - `get_asset_news`: actualités attribuables par le code à une identité d'actif
   vérifiée. Une identité non résolue ne permet pas d'attribution par symbole.
 - `finish_research`: choisit les références de faits et d'informations
@@ -35,7 +61,7 @@ et aucun service d'ordre ne sont nécessaires.
 Les arguments sont validés par le programme. Les mappings explicites vérifiés
 restent prioritaires et ne sont jamais modifiés par la recherche. Si aucun
 mapping ne s'applique, le dossier peut recouper les candidats CoinGecko avec
-le marché exact Bitvavo annoncé par le scanner : une seule paire CoinGecko
+le marché exact Bitvavo observé dans le catalogue : une seule paire CoinGecko
 fraîche sur l'exchange `bitvavo`, avec même base et même cotation, établit une
 résolution `resolved_cross_referenced`. Les preuves, leurs sources et dates
 sont enregistrées dans le dossier; plusieurs correspondances ou une preuve
@@ -98,28 +124,31 @@ Les options `--max-candidates` (1–5), `--max-tool-calls` (1–10), `--timeout`
 génération doit couvrir au moins un tour de recherche plus la conclusion.
 Les tokens et le temps de conclusion sont réservés dès le départ; la recherche
 s'arrête avant de les consommer.
-Le budget total comprend scan, attente de service, appels d'outil et tours
+Le budget total comprend catalogue, attente de service, appels d'outil et tours
 Ollama. Les réponses externes et les appels de génération sont plafonnés.
+Le snapshot initial du catalogue utilise trois requêtes HTTP Bitvavo; les
+consultations des pages suivantes lisent ce snapshot en mémoire et ne refont
+pas la collecte.
 Un appel identique n'est pas répété sans changement de données ou reprise
 autorisée par le code. Un budget épuisé ou une erreur produit un rapport
 partiel avec la raison, les appels, les erreurs et les résultats déjà
 conservés. Chaque requête Ollama est reconstruite depuis un registre à
 références stables; les diagnostics et réponses brutes des outils ne sont pas
-réinjectés dans les tours suivants. Les mesures principales du scanner sont
-transmises une seule fois dans la présélection compacte, avec leurs références
-`scan:<marché>:<métrique>`; les diagnostics détaillés restent dans le rapport.
-Cette réduction est indiquée dans la politique de contexte envoyée au modèle.
+réinjectés dans les tours suivants. Les pages consultées sont transmises avec
+leurs références `market_catalog:<marché>:<métrique>` et les pages non
+consultées restent indiquées comme telles. Le programme ne réduit pas une liste
+classée pour construire cette entrée.
 Un estimateur calibré sur les comptes de
 prompt Ollama observés, `ceil(JSON UTF-8 bytes / 4.5)`, budgète instructions,
 schémas d'outils et
 observations, puis ajoute les tokens de génération demandés et une marge de
-sécurité. Si nécessaire, le scanner retire de la présélection les candidats
-les moins prioritaires qui n'ont pas encore été approfondis; chaque retrait
-est tracé. Les valeurs textuelles abrégées sont signalées par référence et
-restent complètes dans le rapport. Si le contexte ne tient toujours pas, la
-recherche s'arrête au lieu de tronquer silencieusement des preuves.
+sécurité. Si les pages consultées et le registre ne tiennent pas dans le
+contexte, la recherche s'arrête avec `context_budget_exhausted`; elle ne
+supprime pas des marchés consultés pour les remplacer silencieusement. Les
+valeurs textuelles abrégées sont signalées par référence et restent complètes
+dans le rapport.
 
-Le rapport v6 distingue tokens réservés et tokens effectivement générés par
+Le rapport v7 distingue tokens réservés et tokens effectivement générés par
 phase. Chaque tour conserve `think=false`, le compte d'évaluation du prompt,
 les tokens générés, les octets, la durée, les outils demandés et les répétitions
 détectées, l'estimation de prompt, la marge et les références abrégées. Si le JSON final échoue, le rapport produit un résumé déterministe
@@ -262,7 +291,8 @@ crypto-market-agents proposal-cycle \
   --review-json reports/research-review.json \
   --state paper/multiasset-v2.json \
   --model qwen3:8b \
-  --timeout 60 --num-predict 800 --num-ctx 8192 \
+  --timeout 60 --num-predict 800 --tracking-num-predict 384 \
+  --max-tracked-positions 10 --total-num-predict 8192 --num-ctx 8192 \
   --json reports/proposal-cycle.json
 ```
 
@@ -286,9 +316,9 @@ entraîne un rejet de la proposition d'entrée.
 séparée et explicite, qui relit les deux rapports source et le plan sans
 appeler Ollama ni collecter de nouvelles données :
 
-Seuls les rapports `paper-proposal-cycle.v2` produits avec leur empreinte de
-plan peuvent être exécutés; les anciens rapports v1 restent conservés, mais
-ne sont pas acceptés par cette commande.
+Seuls les rapports `paper-proposal-cycle.v3` produits avec leur empreinte de
+plan peuvent être exécutés; les rapports antérieurs v1/v2 restent conservés,
+mais ne sont pas acceptés par cette commande.
 
 ```bash
 crypto-market-agents execute-proposal-cycle \
@@ -338,6 +368,9 @@ fictive est désactivée par défaut. Ce chemin ne possède aucun client d'ordre
 réel ni accès authentifié à Bitvavo. GNews reste inactif par défaut; son
 activation exige `--enable-gnews --confirm-gnews-free-plan`, après vérification
 manuelle du plan dans le compte. Le client garde également son quota persistant.
+L'étape `research` utilise le catalogue paginé non classé décrit plus haut;
+l'orchestrateur ne lance pas la commande facultative `scan` et conserve les
+plafonds existants de génération, d'appels, de contexte et de durée.
 
 Exemple sur un portefeuille v2 existant :
 
@@ -404,28 +437,82 @@ positions.
 Les budgets par défaut sont répartis ainsi. Les réserves de conclusion sont
 incluses dans les plafonds `research`, pas ajoutées une seconde fois.
 
+### Mode autonome « suivi seul »
+
+`automatic-paper-cycle --tracking-only --mode once` suit les positions
+ouvertes sans lancer le scanner, la recherche de candidats ni une revue de
+découverte. Le rapport d'historique est produit par `position-history` : il
+réutilise d'abord les analyses Bitvavo encore fraîches et vérifiées par
+empreinte dans les dossiers de cycles; sinon, il collecte au plus 1 440
+bougies horaires par position (dix positions au maximum). Les échecs et
+historiques insuffisants restent visibles et rendent le suivi incomplet.
+
+Chaque position est évaluée séparément à partir de son marché, de ses
+observations et de la thèse d'entrée uniquement si celle-ci est retrouvée dans
+un cycle exécuté vérifiable. L'absence de thèse n'est pas comblée. Le modèle
+peut proposer `hold`, `reduce`, `close` ou `abstain`; une panne ou des preuves
+insuffisantes donnent un suivi incomplet, jamais une décision implicite de
+conservation. Les règles du PaperEngine, la fraîcheur, les verrous et les
+reçus idempotents restent applicables. L'exécution fictive demeure désactivée
+sans `--enable-paper-execution`.
+
+Un portefeuille sans positions ouvertes termine en `no_open_positions` sans
+requête réseau, appel LLM ni réservation au compteur journalier. Exemple en
+lecture seule :
+
+```bash
+crypto-market-agents automatic-paper-cycle \
+  --state paper/demo-v2.json --reports-dir reports \
+  --objective "Suivre les positions fictives ouvertes" \
+  --model qwen3:8b --mode once --tracking-only
+```
+
+Le mode partage exactement le registre quotidien des cycles complets. Pour
+les dix positions configurées au maximum, il réserve au plus 90 secondes et
+10 requêtes HTTP pour l'historique; puis 400 secondes, 10 appels LLM, 3 840
+tokens générés, 10 invocations externes et 20 tentatives HTTP pour
+propositions et cotations; l'exécution fictive, si activée, ajoute 10 secondes
+et aucun appel réseau/LLM. L'orchestrateur réserve selon le nombre réel de
+positions ouvertes, sans dépasser ces maxima. Le total au pire cas est donc
+500 secondes avec exécution activée (490 sans), 10 appels LLM, 3 840 tokens,
+10 invocations externes et 30 tentatives HTTP. Ces valeurs sont prises sur les
+mêmes plafonds journaliers des cycles complets, sans quota additionnel.
+
+Aux quotas journaliers actuels, un seul suivi seul au pire cas par jour est une
+cadence pilote prudente si le même jour peut aussi accueillir un cycle
+complet : les budgets consommés par ce dernier réduisent le reliquat partagé.
+Un suivi seul maximal isolé consomme 3 840 des 30 000 tokens, 10 des 60 appels
+LLM, 30 des 500 tentatives HTTP et jusqu'à 500 des 3 600 secondes. Il n'est
+pas lancé en boucle par cette commande; `--mode repeat` reste au premier plan
+et n'est pas recommandé pour le pilote tant que les consommations réelles
+n'ont pas été mesurées.
+
 | Étape | Durée maximale | Génération maximale | Appels LLM réservés | Requêtes HTTP réservées |
 |---|---:|---:|---:|---:|
 | Research et conclusion | 300 s, dont 45 s réservées à la conclusion | 6 000 tokens, dont 600 pour la conclusion; 1 200 par tour | 12 (jusqu'à 10 outils, puis appels de contrôle/conclusion) | 80 |
 | Review | 60 s | 900 tokens, un appel | 1 | 0 |
-| Proposal | 180 s au total, réserve de 80 s pour les cotations publiques | 4 000 tokens, 800 par marché, jusqu'à 5 marchés | 5 | 10 |
+| Proposal | 400 s, appels Ollama, historique et cotations dans le même plafond | 8 192 tokens au total : 800 × 5 marchés de découverte + 384 × 10 positions suivies au maximum | 15 (5 découverte + 10 suivi) | 40 (jusqu'à 15 marchés cotés, deux requêtes par marché, plus 10 collectes historiques) |
 | Exécution PaperEngine | 10 s réservées, sans appel réseau ni LLM | 0 | 0 | 0 |
-| **Plafond cycle** | **600 s** | **12 000 tokens** | **20** | **100** |
+| **Plafond cycle** | **800 s** | **16 000 tokens** | **30** | **120** |
 
-Le maximum configuré des étapes est 10 900 tokens, 18 appels LLM, 15 invocations
-d'outils/cotations et 90 tentatives HTTP; ces maxima tiennent dans les plafonds
-du cycle. La création d'une configuration dont les plafonds ne financent pas
-les étapes déclarées est rejetée avant de commencer. Pour cinq marchés,
-proposal répartit le temps modèle après la réserve de cotations (au plus
-environ 20 secondes par appel, puis moins si les appels précédents ont consommé
-du temps); le rapport conserve le timeout effectif de chaque appel.
+Le maximum configuré des étapes est 15 092 tokens de génération, 28 appels
+LLM, 25 invocations d'outils/cotations et 120 tentatives HTTP; ces maxima
+tiennent dans les plafonds du cycle. La création d'une configuration dont les
+plafonds ne financent pas les étapes déclarées est rejetée avant de commencer.
+Le budget de proposition est partagé entre temps modèle et récupération des
+cotations; le rapport conserve le timeout effectif de chaque appel.
+Le plafond de génération par cycle par défaut est explicitement fixé à 16 000
+tokens. L'ancien plafond de 12 000 ne finance pas le maximum des étapes par
+défaut (6 000 + 900 + 8 192 = 15 092) et est rejeté lors du précontrôle; il
+n'est pas augmenté silencieusement par l'orchestrateur. L'exécution PaperEngine
+ne réserve aucun token.
 
 Les options `--research-*`, `--review-*`, `--proposal-*`, `--cycle-*` et
 `--daily-*` rendent ces valeurs configurables. Les budgets sont réservés avant
 chaque étape et rapprochés des consommations. `http_requests` compte les
 tentatives réseau, retries inclus et caches exclus, dans le helper HTTP partagé
-et les clients Bitvavo directs utilisés par le scanner, l'historique et les
-cotations. Les appels locaux Ollama sont comptés séparément dans les budgets
+et les clients Bitvavo directs utilisés par le catalogue, le scanner
+facultatif, l'historique et les cotations. Les appels locaux Ollama sont comptés séparément dans les budgets
 LLM. Les autres accès directs non instrumentés ne sont pas comptabilisés.
 `external_tool_calls` est un compteur séparé des outils de recherche et des
 observations de cotation. Les clients conservent aussi leurs propres délais,
@@ -437,6 +524,25 @@ enregistré dans le manifeste et le quota journalier.
 Le compteur journalier est partagé entre les portefeuilles du même utilisateur
 et conservé dans `~/.local/state/crypto-market-agents/automatic-cycle-daily.json`;
 il ne repart pas de zéro en changeant de portefeuille ou de dossier de rapports.
+Les quotas journaliers par défaut sont 3 600 secondes, 60 appels LLM, 30 000
+tokens générés, 100 appels d'outils externes et 500 tentatives HTTP. Un cycle
+au pire de ses budgets utilise 770 secondes, 28 appels LLM, 15 092 tokens,
+25 appels d'outils et 120 tentatives HTTP. Le quota de génération permet un
+seul cycle complet entièrement au pire cas (deux demanderaient 30 184 tokens); des
+consommations réelles inférieures sont rapprochées et peuvent laisser du budget
+pour d'autres cycles. Le quota GNews distinct reste désactivé sans activation
+explicite.
+
+Pour un pilote, limiter le démarrage à un cycle complet par jour, ou à un
+suivi seul distinct si le suivi est prioritaire. Les deux consomment le même
+registre quotidien : les coûts réels du premier réduisent le budget du second.
+Le suivi seul maximal isolé peut s'exécuter jusqu'à sept fois selon les plafonds
+de génération (30 000 / 3 840), mais cette division ne réserve aucune marge aux
+cycles complets, aux durées réelles ou aux erreurs réseau; elle ne constitue
+pas une recommandation de cadence. Commencer par une exécution manuelle
+quotidienne, mesurer les consommations et réduire la fréquence si des cycles
+complets doivent aussi tourner. Ces recommandations ne démarrent ni n'activent
+un pilote.
 
 Le mode repeat est un processus au premier plan uniquement; aucun service
 illimité en arrière-plan n'est installé ni lancé par cette commande.
@@ -451,11 +557,62 @@ cumulativement liquidités et exposition. Le rapport consigne cet ordre et le
 budget réservé par achat. Les plans de réduction
 ne nécessitent pas de nouvelle thèse d'achat et ne sont pas bloqués par une
 cotation manquante d'une autre position; le marché réduit doit toutefois avoir
-une cotation valide et une identité de position non ambiguë. Jusqu'à cinq
-marchés reçoivent une cotation Bitvavo publique. Le cycle est borné à 180
-secondes. `--num-predict` borne chaque appel (défaut 800, maximum 1200) et
-`--total-num-predict` borne la génération cumulée (défaut 4000, maximum
-8192). Le rapport distingue statut technique, validité des réponses du modèle,
+une cotation valide et une identité de position non ambiguë. Une position
+ouverte est suivie indépendamment de la présélection du scanner : les marchés
+déjà détenus ne sont pas écartés parce qu'ils ne font plus partie des meilleurs
+candidats. Les métriques historiques Bitvavo fraîches déjà présentes dans le
+registre sont réutilisées. Si elles manquent ou sont périmées, une collecte
+historique indépendante est tentée pour chaque position suivie, même si
+research, la découverte ou la revue a échoué : une requête publique de bougies
+1h, limitée à 1 440 bougies par position (dix positions au maximum). L'échec ou
+l'épuisement du temps est consigné et le suivi reste incomplet; cela ne crée
+pas une thèse d'entrée. Le budget de découverte couvre au plus cinq marchés; un budget
+distinct couvre jusqu'à dix positions ouvertes, avec 384 tokens par appel de
+suivi contre 800 par appel de découverte. Le plafond cumulé est configurable
+mais ne dépasse pas 8192 tokens par commande `proposal-cycle`; une position
+au-delà du plafond de suivi est signalée non évaluée, jamais implicitement
+conservée. Les appels par position demandent `hold`, `reduce`, `close` ou
+`abstain`; `close` vend la position entière sous les mêmes contraintes
+existantes de marché, frais et minimums, sans seuil de vente supplémentaire.
+Les cotations nécessaires sont bornées à quinze marchés, avec 30 requêtes HTTP
+réservées au maximum; dix requêtes supplémentaires sont réservées aux collectes
+historiques de position, pour un plafond proposal de 40 requêtes. Si une position ne
+peut être valorisée, le rapport est incomplet. Une cotation fraîche de la
+position autorise l'évaluation d'une réduction même si une autre position est
+non valorisable; les nouvelles entrées restent soumises à la vérification
+globale de l'exposition.
+
+Les preuves de la thèse d'entrée ne sont reprises que si un achat du journal
+du portefeuille se relie à un cycle automatique antérieur dont les artefacts
+proposal/execution et empreintes sont vérifiés sous le répertoire de rapports
+configuré. La thèse est affichée comme historique, jamais comme preuve
+actuelle. Pour les achats anciens, directs, ou dont le rapport source n'est
+plus présent/intègre, la thèse est indiquée absente et n'est pas reconstruite.
+Les pannes du modèle, preuves manquantes, revues insuffisantes et cotations
+périmées produisent un suivi incomplet ou non évalué, pas une décision de
+conservation. Une baisse de prix seule n'est pas un motif suffisant
+d'invalidation. Le dashboard affiche le dernier état de suivi par position
+et différencie une suggestion non validée d'une action examinée.
+Si research échoue sans artefact, l'orchestrateur conserve un rapport explicite
+`unavailable` sans faits, puis poursuit review/proposal pour tenter le suivi
+des positions. Une revue indisponible n'arrête pas proposal. Dans ces cas,
+l'absence de candidat ou de revue rend le suivi incomplet; une éventuelle
+suggestion `hold`, `reduce` ou `close` n'est pas convertie en plan exécutable.
+Les faits du rapport source visant le marché détenu sont transmis même quand
+celui-ci n'est plus présélectionné, mais restent non évalués si la revue manque.
+
+Le cycle est borné à 400 secondes pour proposal. `--num-predict` borne chaque
+appel de découverte (défaut 800, maximum 1200), `--tracking-num-predict` chaque
+appel de suivi (défaut 384, maximum 1200), `--max-tracked-positions` le nombre
+de positions suivies (défaut 10, maximum 10), et `--total-num-predict` la
+génération cumulée (défaut 8192, maximum 8192). Les budgets doivent financer
+les deux catégories au pire de leurs plafonds configurés, sinon la commande
+est rejetée. Dans l'orchestrateur, les options `--proposal-*` portent ces
+limites. Les rapports d'anciens cycles `paper-proposal-cycle.v2` restent
+consultables mais ne peuvent pas être repris comme rapports v3 pour une
+exécution ou un suivi actualisé.
+
+Le rapport distingue statut technique, validité des réponses du modèle,
 admissibilité des plans et décision; un rejet de réponse ne devient jamais une
 abstention volontaire. `think=false`, les budgets, l'estimation de contexte,
 les compteurs de génération, les empreintes des rapports, les cotations et
@@ -464,7 +621,7 @@ Bitvavo est l'heure locale de réception; le ticker consulté ne fournit pas
 l'heure de transaction. Aucun plan ne crée de transaction ou d'ordre réel.
 
 Les rapports d'entrée doivent dater de moins de 24 heures. Les observations
-retenues pour une nouvelle entrée sont évaluées selon leur source : scanner
+retenues pour une nouvelle entrée sont évaluées selon leur source : catalogue
 Bitvavo 1 heure, historique Bitvavo 6 heures, actualités 24 heures et
 fondamentaux CoinGecko/DefiLlama 7 jours. Une source non reconnue par cette
 politique bloque l'entrée jusqu'à l'ajout documenté d'une règle de fraîcheur.

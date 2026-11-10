@@ -33,7 +33,14 @@ def _write(path: Path, value):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _cycle(reports: Path, cycle_id: str, *, status="plans_rejected", stages=None):
+def _cycle(
+    reports: Path,
+    cycle_id: str,
+    *,
+    status="plans_rejected",
+    stages=None,
+    cycle_type="full_discovery",
+):
     directory = reports / "automatic-cycles" / cycle_id
     _write(
         directory / "cycle.json",
@@ -42,6 +49,7 @@ def _cycle(reports: Path, cycle_id: str, *, status="plans_rejected", stages=None
             "cycle_id": cycle_id,
             "created_at": NOW.isoformat(),
             "status": status,
+            "cycle_type": cycle_type,
             "stop_reason": status if status != "paper_executed" else None,
             "model": "qwen3:8b",
             "elapsed_seconds": 24,
@@ -301,6 +309,51 @@ class MultiAssetDashboardTests(unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
         self.assertEqual(len(self.store.load().ledger), 1)
 
+    def test_latest_position_follow_up_is_shown_per_position(self):
+        cycle_id = "9" * 32
+        directory = _cycle(self.reports, cycle_id, status="plans_rejected")
+        proposal = _record(
+            directory,
+            "proposal",
+            {
+                "schema_version": "paper-proposal-cycle.v3",
+                "status": "completed",
+                "position_tracking": {
+                    "status": "partial",
+                    "budget": {"max_positions": 10, "per_position_tokens": 384},
+                    "positions": [
+                        {
+                            "position_key": "mock:ETH-EUR",
+                            "market": "ETH-EUR",
+                            "status": "incomplete",
+                            "suggested_action": "hold",
+                            "rationale": "Aucun nouvel élément n'invalide la thèse observée.",
+                            "reason": "review_evidence_missing",
+                            "entry_thesis_status": "not_found",
+                            "source_status": "partial",
+                            "references": ["portfolio:mock:ETH-EUR"],
+                            "missing_references": ["history:ETH-EUR:activity"],
+                        }
+                    ],
+                },
+            },
+        )
+        _cycle(self.reports, cycle_id, stages={"proposal": proposal})
+
+        snapshot = multi_asset_dashboard_snapshot(self.state_path, self.reports, now=NOW)
+        tracking = snapshot["latest_cycle"]["position_tracking"]
+        self.assertEqual(tracking["status"], "partial")
+        row = tracking["positions"][0]
+        self.assertEqual(row["position_key"], "mock:ETH-EUR")
+        self.assertEqual(row["suggested_action"], "hold")
+        self.assertEqual(row["entry_thesis_status"], "not_found")
+        self.assertIsNone(row["entry_thesis_reference"])
+        self.assertEqual(row["missing_references"], ["history:ETH-EUR:activity"])
+        page = render_multi_asset_dashboard()
+        self.assertIn("Suivi des positions", page)
+        self.assertIn("Suggestion non validée", page)
+        self.assertIn("Cycle source de la thèse", page)
+
     def test_active_lock_is_confirmed_but_idle_lock_is_not_claimed_stopped(self):
         lock_path = self.state_path.with_name(self.state_path.name + ".automatic-cycle.lock")
         with _cycle_lock(self.state_path):
@@ -363,11 +416,12 @@ class MultiAssetDashboardTests(unittest.TestCase):
 
     def test_local_dashboard_routes_are_read_only_and_render_cycle_artifacts_as_json(self):
         cycle_id = "e" * 32
-        directory = _cycle(self.reports, cycle_id)
+        directory = _cycle(self.reports, cycle_id, cycle_type="position_tracking_only")
         _record(directory, "research", {"status": "partial", "summary": "<script>text</script>"})
         _cycle(
             self.reports,
             cycle_id,
+            cycle_type="position_tracking_only",
             stages={
                 "research": {
                     "status": "completed",
@@ -393,6 +447,7 @@ class MultiAssetDashboardTests(unittest.TestCase):
             self.assertEqual(page.status, 200)
             self.assertIn("Simulation — aucun argent réel", html_body)
             self.assertIn("Cycles automatiques", html_body)
+            self.assertIn("Suivi seul", html_body)
             connection.close()
 
             connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
@@ -402,6 +457,7 @@ class MultiAssetDashboardTests(unittest.TestCase):
             self.assertEqual(api.status, 200)
             self.assertEqual(data["external_requests"], 0)
             self.assertEqual(data["llm_calls"], 0)
+            self.assertEqual(data["cycles"][0]["cycle_type"], "position_tracking_only")
             connection.close()
 
             connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
