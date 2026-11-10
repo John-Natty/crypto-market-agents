@@ -157,6 +157,7 @@ class LiveDashboardTests(unittest.TestCase):
                 status, _, body = get(port, path)
                 self.assertEqual(status, 200)
                 self.assertIn("/api/paper", body)
+                self.assertIn("Simulation — aucun argent réel", body)
                 self.assertIn('lang="fr"', body)
             status, _, body = get(port, "/reports")
             self.assertEqual(status, 200)
@@ -170,7 +171,9 @@ class LiveDashboardTests(unittest.TestCase):
 
     def test_default_dashboard_keeps_existing_report_home(self):
         with running_server(self.root) as port:
-            self.assertIn("Crypto Market Agents Dashboard", get(port, "/")[2])
+            body = get(port, "/")[2]
+            self.assertIn("Crypto Market Agents Dashboard", body)
+            self.assertIn("Simulation — aucun argent réel", body)
             self.assertEqual(get(port, "/api/paper")[0], 404)
 
     def test_old_quote_is_not_presented_as_current(self):

@@ -23,6 +23,12 @@ necessaire et aucun ordre reel n'est envoye.
 Guide complet, limites, reprise et commandes : [Paper trading](docs/PAPER_TRADING.md).
 `init` refuse d'ecraser un etat existant; reutiliser `run` pour continuer.
 
+Un mode distinct `paper-multi` prépare un portefeuille fictif à réserve partagée
+de 150 EUR, avec positions par plateforme et marché. Les transactions restent
+simulées; `refresh` peut lire les cotations publiques Bitvavo sans clé et sans
+modifier les positions. Voir la section « Portefeuille fictif multi-actifs » du
+guide Paper trading.
+
 La [politique de recherche et de décision de l’IA](docs/AI_RESEARCH_AND_DECISION_POLICY.md)
 formalise les preuves attendues, la thèse préalable, l’abstention, les baisses,
 les budgets de recherche et les capacités qui restent à construire. C’est une
@@ -271,6 +277,28 @@ make dashboard-mock
 Le dashboard lit les rapports `.json`, `.html` et `.md` du dossier configure,
 ainsi que le portefeuille et son activite lorsque `--state` est fourni. Il ne
 declenche aucun appel API externe, aucune decision et aucune notification.
+
+Pour suivre le portefeuille fictif multi-actifs et l'historique de
+`automatic-paper-cycle`, passez le dossier qui contient
+`automatic-cycles/<uuid>/cycle.json` et le fichier portefeuille :
+
+```bash
+crypto-market-agents dashboard \
+  --reports-dir reports \
+  --state paper/multiasset-v2.json
+```
+
+Cette vue indique en permanence « Simulation — aucun argent réel ». Elle lit
+le sidecar `<state>.quotes-v1.json` sans actualiser les cours; un autre sidecar
+peut être indiqué avec `--quote-state`. Le rafraîchissement de la page ne lance
+ni recherche, ni revue, ni proposition, ni exécution. L'activité « en cours »
+n'est affichée que si le verrou de l'orchestrateur est détenu. Sans verrou,
+l'activité reste « non confirmée », car le processus peut être arrêté ou en
+attente entre deux cycles. Les rapports de cycle sont lus seulement sous le
+dossier configuré, limités aux quatre noms d'étape et contrôlés par empreinte.
+Leur JSON reste servi en `application/json`; le texte libre est rendu comme du
+texte, pas comme du HTML. Une page ou un cycle historique ne représente pas une
+observation actuelle.
 
 ## Agents Disponibles
 

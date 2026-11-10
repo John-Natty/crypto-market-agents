@@ -6,10 +6,20 @@ from .live_layout import LIVE_SHELL
 
 def render_live_dashboard() -> str:
     """Render the Vector terminal with live portfolio data and an inline chat."""
-    return (
+    page = (
         LIVE_SHELL.replace("/* CHAT_STYLE */", CHAT_STYLE)
         .replace("<!-- CHAT_MARKUP -->", CHAT_MARKUP)
         .replace("<!-- LIVE_SCRIPT -->", CHAT_SCRIPT + _LIVE_SCRIPT)
+    )
+    page = page.replace(
+        "</style></head>",
+        ".paper-safety-banner{position:sticky;top:0;z-index:5;padding:9px 18px;background:#5a3417;border-bottom:1px solid #a46a30;color:#ffe2b8;font-weight:800}</style></head>",
+        1,
+    )
+    return page.replace(
+        '<section class="ticker"',
+        '<div class="paper-safety-banner" role="note">Simulation — aucun argent réel</div><section class="ticker"',
+        1,
     )
 
 

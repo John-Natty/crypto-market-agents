@@ -8,8 +8,9 @@ from http.client import HTTPException
 import json
 import re
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from crypto_market_agents.http_utils import _consume_http_request_budget, budgeted_urlopen
 from crypto_market_agents.trading.models import Quote
 
 
@@ -43,7 +44,7 @@ class BitvavoMarketData:
     """Observe public bid/ask and market rules; timestamps indicate local receipt."""
 
     def __init__(self, *, opener=None, now_provider=utc_now, timeout=10):
-        self.opener = opener or urlopen
+        self.opener = opener or budgeted_urlopen
         self.now_provider = now_provider
         self.timeout = timeout
 
@@ -51,6 +52,7 @@ class BitvavoMarketData:
         url = "https://api.bitvavo.com/v2/" + path + "?" + urlencode({"market": market})
         request = Request(url, headers={"Accept": "application/json"}, method="GET")
         try:
+            _consume_http_request_budget()
             with self.opener(request, timeout=self.timeout) as response:
                 raw = response.read(1_000_001)
                 if len(raw) > 1_000_000:

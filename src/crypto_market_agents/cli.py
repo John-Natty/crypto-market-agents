@@ -7,8 +7,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+import hashlib
 from pathlib import Path
 import json
+import os
 import time
 from typing import Any
 
@@ -17,10 +19,15 @@ from crypto_market_agents.agents.asset_fundamentals import enrich_analysis_repor
 from crypto_market_agents.clients.coingecko_client import CoinGeckoClient
 from crypto_market_agents.clients.defillama_client import DefiLlamaClient
 from crypto_market_agents.clients.bitvavo_asset_client import BitvavoAssetClient
+from crypto_market_agents.clients.rss_news_client import RSSNewsClient
+from crypto_market_agents.clients.gnews_news_client import GNewsNewsClient
+from crypto_market_agents.config import read_env_file
+from crypto_market_agents.http_utils import HTTPClientSettings
 from crypto_market_agents.dashboard import serve_dashboard
 from crypto_market_agents.file_utils import reserve_report_paths
 from crypto_market_agents.security import redact_text
 from crypto_market_agents.trading.cli import add_paper_parser, run_paper
+from crypto_market_agents.trading.multi_asset_cli import add_multi_asset_parser, run_multi_asset
 from crypto_market_agents.trading.scanner import BitvavoScanner, ScanConfig
 from crypto_market_agents.trading.history_client import BitvavoCandleClient
 from crypto_market_agents.trading.deep_analysis import DeepMarketAnalyzer
@@ -28,6 +35,10 @@ from crypto_market_agents.trading.autonomous_research import (
     AutonomousResearchRunner,
     ResearchLimits,
 )
+from crypto_market_agents.trading.research_review import review_research_report
+from crypto_market_agents.trading.proposal_cycle import run_proposal_cycle
+from crypto_market_agents.trading.proposal_execution import execute_proposal_cycle
+from crypto_market_agents.trading.multi_asset import MultiAssetPaperStore
 from crypto_market_agents.trading.evaluation import (
     DeterministicEvaluator,
     OllamaCandidateEvaluator,
@@ -140,6 +151,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fichier du portefeuille simule a suivre en direct (ex. paper/bitvavo.json).",
     )
     dashboard_parser.add_argument(
+        "--quote-state",
+        default=None,
+        help="Sidecar de cotations multi-actifs; défaut : <state>.quotes-v1.json.",
+    )
+    dashboard_parser.add_argument(
         "--host",
         default="127.0.0.1",
         help="Host interface for the local dashboard, default: 127.0.0.1.",
@@ -152,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     add_paper_parser(subparsers)
+    add_multi_asset_parser(subparsers)
     scan = subparsers.add_parser(
         "scan", help="Présélection en lecture seule des marchés EUR Bitvavo."
     )
@@ -214,6 +231,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", dest="json_path", required=True, help="Nouveau rapport JSON (jamais écrasé)."
     )
     research.add_argument("--mapping", default="data/asset-identity-mappings.json")
+    research.add_argument(
+        "--news-sources",
+        default="data/news-sources.json",
+        help="Catalogue HTTPS de flux RSS/Atom autorisés.",
+    )
+    research.add_argument(
+        "--news-window-days",
+        type=int,
+        default=30,
+        help="Fenêtre de publication évaluée pour les actualités (1–365 jours).",
+    )
+    research.add_argument(
+        "--enable-gnews",
+        action="store_true",
+        help="Activer explicitement GNews après vérification manuelle du plan gratuit.",
+    )
+    research.add_argument(
+        "--confirm-gnews-free-plan",
+        action="store_true",
+        help="Confirmer que le compte GNews utilisé est sur le plan gratuit sans paiement.",
+    )
+    research.add_argument(
+        "--gnews-env-file",
+        default=".env",
+        help="Fichier dotenv lu seulement si GNews est activé (variable GNEWS_API_KEY).",
+    )
+    research.add_argument("--gnews-window-days", type=int, default=30)
+    research.add_argument("--gnews-max-requests-per-research", type=int, default=5)
+    research.add_argument("--gnews-max-requests-per-day", type=int, default=20)
     research.add_argument("--max-candidates", type=int, default=5)
     research.add_argument("--max-tool-calls", type=int, default=10)
     research.add_argument(
@@ -229,6 +275,114 @@ def build_parser() -> argparse.ArgumentParser:
     research.add_argument("--context-safety-margin-tokens", type=int, default=512)
     research.add_argument("--max-response-bytes", type=int, default=200000)
     research.add_argument("--num-ctx", type=int, default=8192)
+    review = subparsers.add_parser(
+        "review-research",
+        help="Revue contradictoire en lecture seule d'un rapport de recherche existant.",
+    )
+    review.add_argument(
+        "--input-json", required=True, help="Rapport autonome existant, lu seulement."
+    )
+    review.add_argument("--json", dest="json_path", required=True, help="Nouveau rapport de revue.")
+    review.add_argument("--model", default="qwen3:8b", help="Modèle Ollama local.")
+    review.add_argument(
+        "--timeout", type=int, default=60, help="Limite d'appel Ollama en secondes (1–120)."
+    )
+    review.add_argument(
+        "--num-predict", type=int, default=900, help="Budget de génération (128–2048)."
+    )
+    review.add_argument(
+        "--num-ctx", type=int, default=8192, help="Taille du contexte Ollama (4096–32768)."
+    )
+    review.add_argument("--context-safety-margin-tokens", type=int, default=512)
+    cycle = subparsers.add_parser(
+        "proposal-cycle",
+        help="Produire un plan multi-actifs contrôlé, sans opération ni mutation du portefeuille.",
+    )
+    cycle.add_argument("--research-json", required=True, help="Rapport research figé.")
+    cycle.add_argument(
+        "--review-json", required=True, help="Revue liée par empreinte au rapport research."
+    )
+    cycle.add_argument(
+        "--state",
+        default="paper/multiasset-v1.json",
+        help="Portefeuille fictif multi-actifs existant.",
+    )
+    cycle.add_argument("--json", dest="json_path", required=True, help="Nouveau rapport de plan.")
+    cycle.add_argument("--model", default="qwen3:8b", help="Modèle Ollama local.")
+    cycle.add_argument("--timeout", type=int, default=60, help="Timeout Ollama (1–90s).")
+    cycle.add_argument(
+        "--num-predict",
+        type=int,
+        default=800,
+        help="Génération maximale par marché (128–1200 tokens).",
+    )
+    cycle.add_argument(
+        "--total-num-predict",
+        type=int,
+        default=4000,
+        help="Budget cumulé de génération (au plus 8192 tokens).",
+    )
+    cycle.add_argument(
+        "--num-ctx", type=int, default=8192, help="Contexte Ollama (4096–32768 tokens)."
+    )
+    execute_cycle = subparsers.add_parser(
+        "execute-proposal-cycle",
+        help="Engager explicitement les plans acceptés dans le portefeuille fictif, sans ordre réel.",
+    )
+    execute_cycle.add_argument(
+        "--plan-json", required=True, help="Nouveau rapport proposal-cycle v2."
+    )
+    execute_cycle.add_argument("--research-json", required=True, help="Rapport source figé.")
+    execute_cycle.add_argument("--review-json", required=True, help="Revue source figée.")
+    execute_cycle.add_argument(
+        "--state", required=True, help="Portefeuille fictif multi-actifs v2."
+    )
+    execute_cycle.add_argument(
+        "--json", dest="json_path", required=True, help="Nouveau rapport d'exécution."
+    )
+    automatic = subparsers.add_parser(
+        "automatic-paper-cycle",
+        help="Orchestrer research, revue, proposition et éventuellement exécution fictive.",
+    )
+    automatic.add_argument("--state", required=True, help="Portefeuille multi-actifs existant v2.")
+    automatic.add_argument("--reports-dir", default="reports")
+    automatic.add_argument("--objective", required=True)
+    automatic.add_argument("--model", default="qwen3:8b")
+    automatic.add_argument("--mode", choices=("once", "repeat"), default="once")
+    automatic.add_argument("--interval-seconds", type=int, default=3600)
+    automatic.add_argument("--resume", help="Dossier d'un cycle interrompu à reprendre.")
+    automatic.add_argument(
+        "--stop-file", help="Si présent, terminer l'étape courante sans démarrer la suivante."
+    )
+    automatic.add_argument(
+        "--enable-paper-execution",
+        action="store_true",
+        help="Activer explicitement les opérations fictives PaperEngine.",
+    )
+    automatic.add_argument("--enable-gnews", action="store_true")
+    automatic.add_argument("--confirm-gnews-free-plan", action="store_true")
+    automatic.add_argument("--cycle-timeout", type=int, default=600)
+    automatic.add_argument("--cycle-llm-calls", type=int, default=20)
+    automatic.add_argument("--cycle-generation-tokens", type=int, default=12000)
+    automatic.add_argument("--cycle-external-tools", type=int, default=25)
+    automatic.add_argument("--cycle-http-requests", type=int, default=100)
+    automatic.add_argument("--research-candidates", type=int, default=5)
+    automatic.add_argument("--research-tool-calls", type=int, default=10)
+    automatic.add_argument("--research-timeout", type=int, default=300)
+    automatic.add_argument("--research-num-predict", type=int, default=1200)
+    automatic.add_argument("--research-total-num-predict", type=int, default=6000)
+    automatic.add_argument("--research-conclusion-num-predict", type=int, default=600)
+    automatic.add_argument("--research-conclusion-timeout", type=int, default=45)
+    automatic.add_argument("--review-timeout", type=int, default=60)
+    automatic.add_argument("--review-num-predict", type=int, default=900)
+    automatic.add_argument("--proposal-timeout", type=int, default=60)
+    automatic.add_argument("--proposal-num-predict", type=int, default=800)
+    automatic.add_argument("--proposal-total-num-predict", type=int, default=4000)
+    automatic.add_argument("--daily-seconds", type=int, default=3600)
+    automatic.add_argument("--daily-llm-calls", type=int, default=60)
+    automatic.add_argument("--daily-generation-tokens", type=int, default=30000)
+    automatic.add_argument("--daily-external-tools", type=int, default=100)
+    automatic.add_argument("--daily-http-requests", type=int, default=500)
     return parser
 
 
@@ -244,6 +398,91 @@ def main(
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "automatic-paper-cycle":
+        from crypto_market_agents.trading.automatic_cycle import (
+            AutomaticCycleRunner,
+            run_repeating,
+        )
+
+        try:
+            if args.confirm_gnews_free_plan and not args.enable_gnews:
+                raise ValueError("--confirm-gnews-free-plan nécessite --enable-gnews.")
+            if args.enable_gnews and not args.confirm_gnews_free_plan:
+                raise ValueError(
+                    "GNews exige une activation et confirmation explicites du plan gratuit."
+                )
+            if args.stop_file and args.mode == "repeat" and Path(args.stop_file).exists():
+                print("Arrêt demandé avant le premier cycle; aucun nouveau cycle démarré.")
+                return 0
+            runner = AutomaticCycleRunner(
+                state=args.state,
+                reports_dir=args.reports_dir,
+                invoke=lambda stage_args: main(stage_args),
+                model=args.model,
+                objective=args.objective,
+                enable_paper_execution=args.enable_paper_execution,
+                enable_gnews=args.enable_gnews,
+                confirm_gnews_free_plan=args.confirm_gnews_free_plan,
+                cycle_timeout_seconds=args.cycle_timeout,
+                daily_limits={
+                    "duration_seconds": args.daily_seconds,
+                    "llm_calls": args.daily_llm_calls,
+                    "generation_tokens": args.daily_generation_tokens,
+                    "external_tool_calls": args.daily_external_tools,
+                    "http_requests": args.daily_http_requests,
+                },
+                cycle_limits={
+                    "llm_calls": args.cycle_llm_calls,
+                    "generation_tokens": args.cycle_generation_tokens,
+                    "external_tool_calls": args.cycle_external_tools,
+                    "http_requests": args.cycle_http_requests,
+                },
+                research_limits={
+                    "timeout": args.research_timeout,
+                    "llm_timeout": min(90, args.research_timeout),
+                    "num_predict": args.research_num_predict,
+                    "total_num_predict": args.research_total_num_predict,
+                    "conclusion_num_predict": args.research_conclusion_num_predict,
+                    "conclusion_timeout": args.research_conclusion_timeout,
+                    "max_tool_calls": args.research_tool_calls,
+                    "max_candidates": args.research_candidates,
+                },
+                review_limits={
+                    "timeout": args.review_timeout,
+                    "num_predict": args.review_num_predict,
+                },
+                proposal_limits={
+                    "timeout": args.proposal_timeout,
+                    "num_predict": args.proposal_num_predict,
+                    "total_num_predict": args.proposal_total_num_predict,
+                },
+            )
+
+            def stop():
+                return bool(args.stop_file and Path(args.stop_file).exists())
+
+            if args.mode == "repeat":
+                outcomes = run_repeating(
+                    runner,
+                    interval_seconds=args.interval_seconds,
+                    stop_requested=stop,
+                )
+                for outcome in outcomes:
+                    print(f"Cycle automatique {outcome['cycle_id']}: {outcome['status']}")
+                return 0 if all(item["status"] != "technical_error" for item in outcomes) else 1
+            result = runner.run(resume=args.resume, stop_requested=stop)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Cycle automatique impossible: {type(exc).__name__}: {exc}")
+            return 1
+        print(
+            f"Cycle automatique {result['cycle_id']} | statut: {result['status']} | étapes: "
+            + ", ".join(
+                f"{name}={item['status']}" for name, item in result.get("stages", {}).items()
+            )
+        )
+        print(f"Dossier: {Path(args.reports_dir) / 'automatic-cycles' / result['cycle_id']}")
+        return 0 if result["status"] not in {"technical_error", "budget_exhausted"} else 1
 
     if args.command == "enrich":
         try:
@@ -290,6 +529,14 @@ def main(
                 raise ValueError("Le fichier de sortie existe déjà; choisir un nouveau chemin.")
             if args.llm_timeout <= 0 or args.llm_timeout > 180:
                 raise ValueError("--llm-timeout doit être entre 1 et 180 secondes.")
+            if args.confirm_gnews_free_plan and not args.enable_gnews:
+                raise ValueError("--confirm-gnews-free-plan nécessite --enable-gnews.")
+            if args.enable_gnews and not args.confirm_gnews_free_plan:
+                raise ValueError(
+                    "GNews désactivé : vérifiez le plan gratuit dans votre compte, puis fournissez --confirm-gnews-free-plan."
+                )
+            if not 1 <= args.gnews_window_days <= 30:
+                raise ValueError("--gnews-window-days doit être entre 1 et 30.")
             limits = ResearchLimits(
                 max_candidates=args.max_candidates,
                 max_tool_calls=args.max_tool_calls,
@@ -322,6 +569,35 @@ def main(
             bitvavo_assets = BitvavoAssetClient.from_env()
             coingecko = CoinGeckoClient.from_free_public_api()
             defillama = DefiLlamaClient.from_env()
+            rss_news = RSSNewsClient.from_config_file(args.news_sources, timeout_seconds=8)
+            gnews = None
+            if args.enable_gnews:
+                env_values = {}
+                env_path = Path(args.gnews_env_file)
+                if env_path.exists():
+                    env_values = read_env_file(env_path)
+                gnews_key = os.environ.get("GNEWS_API_KEY") or env_values.get("GNEWS_API_KEY")
+                if not gnews_key:
+                    raise ValueError(
+                        "GNews activé mais GNEWS_API_KEY est absent de l'environnement."
+                    )
+                gnews_settings = HTTPClientSettings.from_env()
+                gnews_settings = HTTPClientSettings(
+                    max_retries=0,
+                    backoff_seconds=0,
+                    cache_ttl_seconds=max(60, gnews_settings.cache_ttl_seconds),
+                    cache_enabled=True,
+                    cache_backend="file",
+                    cache_dir=".cache/crypto-market-agents/gnews/http",
+                )
+                gnews = GNewsNewsClient(
+                    api_key=gnews_key,
+                    timeout_seconds=8,
+                    max_requests_per_research=args.gnews_max_requests_per_research,
+                    max_requests_per_day=args.gnews_max_requests_per_day,
+                    quota_path=".cache/crypto-market-agents/gnews/daily-quota.sqlite3",
+                    http_settings=gnews_settings,
+                )
 
             def scan_with_budget(remaining):
                 if remaining < 3:
@@ -378,15 +654,68 @@ def main(
                     for client, old_timeout in zip(clients, old_timeouts, strict=True):
                         client.timeout_seconds = old_timeout
 
+            def news_one(scope, market, identity, remaining):
+                if remaining < 1:
+                    raise TimeoutError("budget_exhausted_before_news")
+                if not 1 <= args.news_window_days <= 365:
+                    raise ValueError("--news-window-days must be between 1 and 365")
+                old_timeout = rss_news.timeout_seconds
+                try:
+                    rss_news.timeout_seconds = min(old_timeout, max(1, int(remaining)))
+                    if scope == "market":
+                        result = rss_news.search_market(
+                            budget_seconds=remaining, window_days=args.news_window_days
+                        )
+                    else:
+                        result = rss_news.search_asset(
+                            identity=identity,
+                            budget_seconds=remaining,
+                            window_days=args.news_window_days,
+                        )
+                    result["tool_invocation_market"] = market
+                    return result
+                finally:
+                    rss_news.timeout_seconds = old_timeout
+
+            def gnews_one(scope, market, identity, remaining):
+                if gnews is None:
+                    raise RuntimeError("gnews_tool_not_configured")
+                if remaining < 1:
+                    raise TimeoutError("budget_exhausted_before_gnews")
+                old_timeout = gnews.timeout_seconds
+                try:
+                    gnews.timeout_seconds = min(old_timeout, max(1, int(remaining)))
+                    if scope == "market":
+                        result = gnews.search_market(
+                            budget_seconds=remaining, window_days=args.gnews_window_days
+                        )
+                    else:
+                        result = gnews.search_asset(
+                            identity=identity,
+                            budget_seconds=remaining,
+                            window_days=args.gnews_window_days,
+                        )
+                    result["tool_invocation_market"] = market
+                    return result
+                finally:
+                    gnews.timeout_seconds = old_timeout
+
             runner = AutonomousResearchRunner(
                 model=args.model,
                 ollama=evaluator,
                 scan=scan_with_budget,
                 analyze=analyze_one,
                 fundamentals=fundamentals_one,
+                news=news_one,
+                gnews=gnews_one if gnews is not None else None,
                 limits=limits,
             )
             result = runner.run(args.objective)
+            result["gnews_configuration"] = (
+                gnews.usage_summary()
+                if gnews is not None
+                else {"enabled": False, "reason": "disabled_by_default"}
+            )
             destination.parent.mkdir(parents=True, exist_ok=True)
             with destination.open("x", encoding="utf-8") as handle:
                 json.dump(result, handle, ensure_ascii=False, indent=2)
@@ -405,8 +734,164 @@ def main(
         )
         return 0
 
+    if args.command == "review-research":
+        try:
+            source = Path(args.input_json)
+            destination = Path(args.json_path)
+            if not source.is_file():
+                raise ValueError("Le rapport source doit être un fichier existant.")
+            if destination.exists() or source.resolve() == destination.resolve():
+                raise ValueError("Le rapport de revue doit être un nouveau fichier séparé.")
+            source_bytes = source.read_bytes()
+            report = json.loads(source_bytes)
+            evaluator = OllamaCandidateEvaluator(
+                args.model,
+                timeout=args.timeout,
+                num_predict=args.num_predict,
+                total_timeout=args.timeout,
+                total_num_predict=args.num_predict,
+                num_ctx=args.num_ctx,
+            )
+            result = review_research_report(
+                report,
+                evaluator,
+                source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+                source_label=source.as_posix(),
+                model=args.model,
+                num_predict=args.num_predict,
+                timeout_seconds=args.timeout,
+                num_ctx=args.num_ctx,
+                safety_margin_tokens=args.context_safety_margin_tokens,
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("x", encoding="utf-8") as handle:
+                json.dump(result, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+            print(f"Revue impossible: {type(exc).__name__}: {exc}")
+            return 1
+        print(f"Revue {result['status']} | JSON: {destination}")
+        return 0
+
+    if args.command == "proposal-cycle":
+        try:
+            source_research = Path(args.research_json)
+            source_review = Path(args.review_json)
+            destination = Path(args.json_path)
+            state_path = Path(args.state)
+            if not source_research.is_file() or not source_review.is_file():
+                raise ValueError("Les rapports research et review doivent exister.")
+            if destination.exists() or destination.resolve() in {
+                source_research.resolve(),
+                source_review.resolve(),
+                state_path.resolve(),
+            }:
+                raise ValueError("Le rapport de cycle doit être nouveau et séparé de ses entrées.")
+            research_bytes = source_research.read_bytes()
+            review_bytes = source_review.read_bytes()
+            if len(research_bytes) > 20 * 1024 * 1024 or len(review_bytes) > 20 * 1024 * 1024:
+                raise ValueError("Rapport d'entrée trop volumineux.")
+            research = json.loads(research_bytes)
+            review = json.loads(review_bytes)
+            portfolio = MultiAssetPaperStore(state_path).load()
+            evaluator = OllamaCandidateEvaluator(
+                args.model,
+                timeout=args.timeout,
+                num_predict=args.num_predict,
+                total_timeout=180,
+                total_num_predict=args.total_num_predict,
+                num_ctx=args.num_ctx,
+            )
+            result = run_proposal_cycle(
+                research,
+                review,
+                portfolio,
+                evaluator,
+                research_sha256=hashlib.sha256(research_bytes).hexdigest(),
+                review_sha256=hashlib.sha256(review_bytes).hexdigest(),
+                research_label=source_research.as_posix(),
+                review_label=source_review.as_posix(),
+                model=args.model,
+                num_predict=args.num_predict,
+                total_num_predict=args.total_num_predict,
+                timeout_seconds=args.timeout,
+                num_ctx=args.num_ctx,
+                now_provider=lambda: datetime.now().astimezone(),
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("x", encoding="utf-8") as handle:
+                json.dump(result, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+            print(f"Cycle de proposition impossible: {type(exc).__name__}: {exc}")
+            return 1
+        print(
+            "Cycle technique {technical} | réponse modèle {model} | admissibilité {plans} | décision {decision} | propositions: {count} | JSON: {path}".format(
+                technical=result.get("technical_status", "unknown"),
+                model=result.get("model_response_status", "unknown"),
+                plans=result.get("plan_admissibility", "unknown"),
+                decision=result.get("decision_status", "unknown"),
+                count=len(result.get("proposals", [])),
+                path=destination,
+            )
+        )
+        return 0 if result.get("technical_status") in {"completed", "partial"} else 1
+
+    if args.command == "execute-proposal-cycle":
+        try:
+            plan_path = Path(args.plan_json)
+            research_path = Path(args.research_json)
+            review_path = Path(args.review_json)
+            state_path = Path(args.state)
+            destination = Path(args.json_path)
+            for source_path in (plan_path, research_path, review_path):
+                if not source_path.is_file():
+                    raise ValueError(f"Fichier d'entrée absent: {source_path}")
+            if destination.exists() or destination.resolve() in {
+                plan_path.resolve(),
+                research_path.resolve(),
+                review_path.resolve(),
+                state_path.resolve(),
+            }:
+                raise ValueError("Le rapport d'exécution doit être nouveau et séparé des entrées.")
+            plan_bytes = plan_path.read_bytes()
+            research_bytes = research_path.read_bytes()
+            review_bytes = review_path.read_bytes()
+            if any(
+                len(value) > 20 * 1024 * 1024
+                for value in (plan_bytes, research_bytes, review_bytes)
+            ):
+                raise ValueError("Rapport d'entrée trop volumineux.")
+            result = execute_proposal_cycle(
+                json.loads(plan_bytes),
+                json.loads(research_bytes),
+                json.loads(review_bytes),
+                MultiAssetPaperStore(state_path),
+                research_sha256=hashlib.sha256(research_bytes).hexdigest(),
+                review_sha256=hashlib.sha256(review_bytes).hexdigest(),
+                now=datetime.now().astimezone(),
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("x", encoding="utf-8") as handle:
+                json.dump(result, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError) as exc:
+            print(f"Exécution fictive impossible: {type(exc).__name__}: {exc}")
+            return 1
+        print(
+            f"Exécution fictive {result.get('status')} | transactions: {result.get('transaction_count', 0)} | JSON: {destination}"
+        )
+        return (
+            0
+            if result.get("status") in {"committed", "no_accepted_operations", "no_transactions"}
+            else 1
+        )
+
     if args.command == "paper":
         return run_paper(args, sleep_func=sleep_func)
+
+    if args.command == "paper-multi":
+        return run_multi_asset(args, now_provider=lambda: datetime.now().astimezone())
 
     if args.command == "scan":
         try:
@@ -553,7 +1038,11 @@ def main(
             reports_dir=args.reports_dir,
             host=args.host,
             port=args.port,
-            **({"state": args.state} if args.state is not None else {}),
+            **(
+                {"state": args.state, "quote_state": args.quote_state}
+                if args.state is not None
+                else {}
+            ),
         )
         return 0
 

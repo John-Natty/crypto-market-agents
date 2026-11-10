@@ -7,11 +7,12 @@ import os
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from urllib.parse import urlsplit
 
 from crypto_market_agents.http_utils import (
     HTTPClientSettings,
+    budgeted_urlopen,
     build_cache_backend,
     send_request_with_retries,
 )
@@ -44,7 +45,7 @@ class BitvavoAssetClient:
         ):
             raise ValueError("timeout_seconds must be a positive integer")
         self.timeout_seconds = timeout_seconds
-        self._opener = opener or urlopen
+        self._opener = opener or budgeted_urlopen
         self.http_settings = http_settings or HTTPClientSettings.from_env()
         self._cache = cache if cache is not None else build_cache_backend(self.http_settings)
 

@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from crypto_market_agents.http_utils import _consume_http_request_budget, budgeted_urlopen
 
 
 def _decimal(value, field):
@@ -59,7 +61,7 @@ class BitvavoScanner:
     """Three grouped, unauthenticated GETs; no trade or LLM endpoint is called."""
 
     def __init__(self, *, opener=None, now_provider=None, timeout=10):
-        self.opener = opener or urlopen
+        self.opener = opener or budgeted_urlopen
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self.timeout = timeout
 
@@ -68,6 +70,7 @@ class BitvavoScanner:
             "https://api.bitvavo.com/v2/" + endpoint, headers={"Accept": "application/json"}
         )
         try:
+            _consume_http_request_budget()
             with self.opener(req, timeout=self.timeout) as response:
                 raw = response.read(5_000_001)
                 if len(raw) > 5_000_000:

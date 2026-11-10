@@ -16,6 +16,12 @@ from crypto_market_agents.security import redact_mapping, redact_text
 from crypto_market_agents.trading.chat import ChatError, reply_to_chat, validate_chat_request
 from crypto_market_agents.trading.live import live_snapshot
 from crypto_market_agents.trading.live_view import render_live_dashboard
+from crypto_market_agents.trading.multi_asset_dashboard import (
+    cycle_report_bytes,
+    is_multi_asset_state,
+    multi_asset_dashboard_snapshot,
+    render_multi_asset_dashboard,
+)
 import logging
 
 
@@ -194,10 +200,11 @@ def serve_dashboard(
     host: str = "127.0.0.1",
     port: int = 8000,
     state: str | Path | None = None,
+    quote_state: str | Path | None = None,
 ) -> None:
     """Start the local dashboard HTTP server."""
 
-    handler = make_dashboard_handler(reports_dir, state=state)
+    handler = make_dashboard_handler(reports_dir, state=state, quote_state=quote_state)
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Dashboard disponible: http://{host}:{port}")
     print(f"Dossier rapports: {Path(reports_dir)}")
@@ -212,11 +219,15 @@ def serve_dashboard(
 
 
 def make_dashboard_handler(
-    reports_dir: str | Path, *, state: str | Path | None = None
+    reports_dir: str | Path,
+    *,
+    state: str | Path | None = None,
+    quote_state: str | Path | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Return a BaseHTTPRequestHandler class bound to one reports directory."""
 
     state_path = Path(state).expanduser().absolute() if state is not None else None
+    quote_state_path = Path(quote_state).expanduser().absolute() if quote_state else None
     chat_lock = Lock()
 
     class DashboardRequestHandler(BaseHTTPRequestHandler):
@@ -353,9 +364,22 @@ def make_dashboard_handler(
                 self._send_paper_snapshot()
                 return
 
+            if parsed.path == "/api/multi-asset":
+                self._send_multi_asset_snapshot()
+                return
+
             try:
                 if parsed.path in {"/", "/live"} and state_path is not None:
+                    if is_multi_asset_state(state_path):
+                        self._send_html(render_multi_asset_dashboard())
+                        return
                     self._send_html(render_live_dashboard())
+                    return
+                if parsed.path == "/cycle-file":
+                    cycle_id = _single_query_value(query, "cycle_id")
+                    stage = _single_query_value(query, "stage")
+                    body = cycle_report_bytes(reports_dir, cycle_id, stage)
+                    self._send_bytes(200, "application/json; charset=utf-8", body)
                     return
                 if parsed.path in {"/", "/reports"}:
                     self._send_html(
@@ -432,6 +456,23 @@ def make_dashboard_handler(
                 "application/json; charset=utf-8",
                 json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"),
             )
+
+        def _send_multi_asset_snapshot(self) -> None:
+            payload = multi_asset_dashboard_snapshot(
+                state_path or "",
+                reports_dir,
+                quote_state_path=quote_state_path,
+            )
+            status = (
+                200
+                if payload.get("ok")
+                else {
+                    "state_missing": 404,
+                    "state_invalid": 422,
+                    "state_unavailable": 503,
+                }.get(payload.get("error"), 503)
+            )
+            self._send_json(status, payload)
 
         def _send_html(self, body: str, *, status: int = 200) -> None:
             self._send_bytes(status, "text/html; charset=utf-8", body.encode("utf-8"))
@@ -599,6 +640,7 @@ def _page(title: str, sections: list[str]) -> str:
             "</head>",
             "<body>",
             '  <main class="dashboard">',
+            '    <div class="simulation-banner" role="note">Simulation — aucun argent réel</div>',
             *sections,
             "  </main>",
             "</body>",
@@ -716,6 +758,18 @@ def _styles() -> str:
       width: min(1100px, calc(100% - 32px));
       margin: 0 auto;
       padding: 32px 0;
+    }
+    .simulation-banner {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      border: 1px solid #bc8544;
+      border-radius: 8px;
+      background: #fff0d7;
+      color: #603a12;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+      font-weight: 700;
     }
     .hero, .card {
       background: var(--panel);

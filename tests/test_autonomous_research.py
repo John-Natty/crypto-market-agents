@@ -14,11 +14,13 @@ from crypto_market_agents.trading.autonomous_research import (
     ALLOWED_TOOLS,
     AutonomousResearchRunner,
     ResearchLimits,
+    _budgeted_conclusion_context,
     _budgeted_research_context,
     _conclusion_schema,
 )
+import crypto_market_agents.trading.autonomous_research as research_module
 from crypto_market_agents.trading.evaluation import OllamaCandidateEvaluator
-from crypto_market_agents.cli import main
+from crypto_market_agents.cli import build_parser, main
 
 
 def scan(score=80):
@@ -243,6 +245,8 @@ class AutonomousResearchTests(unittest.TestCase):
         clock=None,
         analyze_fn=None,
         fundamentals_fn=None,
+        news_fn=None,
+        gnews_fn=None,
     ):
         clock = clock or FakeClock()
         return AutonomousResearchRunner(
@@ -253,6 +257,8 @@ class AutonomousResearchTests(unittest.TestCase):
             or (lambda market, candidate, scan_result, remaining: history(market)),
             fundamentals=fundamentals_fn
             or (lambda market, candidate, remaining: fundamentals(market)),
+            news=news_fn,
+            gnews=gnews_fn,
             limits=limits or ResearchLimits(total_timeout_seconds=60),
             now_provider=lambda: datetime(2026, 11, 9, tzinfo=timezone.utc),
             monotonic=clock.monotonic,
@@ -294,6 +300,360 @@ class AutonomousResearchTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "completed")
         self.assertEqual(selected, ["analyze_candidate", "get_fundamentals"])
+
+    def test_model_can_choose_general_news_and_conclusion_labels_reported_claims(self):
+        news_calls = []
+
+        def news_fn(scope, market, identity, remaining):
+            news_calls.append((scope, market, identity, remaining))
+            return {
+                "scope": "market",
+                "search_scope": "general_market_context",
+                "tool_invocation_market": market,
+                "asset_attribution": "not_established",
+                "search_window": {
+                    "requested_days": 30,
+                    "published_after": "2026-10-10T00:00:00+00:00",
+                },
+                "dates_obtained": {"oldest_publication_at": None, "newest_publication_at": None},
+                "search_result_status": "relevant_items_observed_within_window",
+                "coverage": {
+                    "status": "partial_configured_source_coverage",
+                    "coverage_missing": ["feed-two"],
+                },
+                "articles": [
+                    {
+                        "id": "article-1",
+                        "title": "Source reports a market event",
+                        "publisher": "Publisher",
+                        "source_id": "feed-one",
+                        "source_type": "news_article",
+                        "url": "https://news.example/story",
+                        "excerpt": "A reported claim.",
+                        "excerpt_source": "description",
+                        "is_full_article": False,
+                        "published_at": None,
+                        "publication_date_status": "unknown",
+                        "collected_at": "2026-11-09T10:00:00+00:00",
+                        "coverage_group_id": "group-1",
+                        "relevance_status": "general_macro_regulatory_context",
+                        "freshness_status": "within_requested_window",
+                        "external_content_untrusted": True,
+                    }
+                ],
+                "coverage_groups": [
+                    {
+                        "id": "group-1",
+                        "article_refs": ["article-1"],
+                        "publisher_count": 1,
+                        "repeated_coverage_is_not_independent_confirmation": False,
+                    }
+                ],
+                "source_results": [
+                    {
+                        "source_id": "feed-one",
+                        "publisher": "Publisher",
+                        "status": "success",
+                        "article_count": 1,
+                    },
+                    {
+                        "source_id": "feed-two",
+                        "publisher": "Publisher Two",
+                        "status": "error",
+                        "error": "TimeoutError",
+                    },
+                ],
+            }
+
+        fake = FakeOllama(
+            [
+                call("get_market_news", {"market": "AAA-EUR"}),
+                call(
+                    "finish_research",
+                    {
+                        "candidates": [
+                            {
+                                "market": "AAA-EUR",
+                                "fact_refs": ["news:general:AAA-EUR:article:article-1"],
+                                "missing_refs": ["news:general:AAA-EUR:source:feed-two"],
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        runner, _ = self.make_runner(fake, news_fn=news_fn)
+        result = runner.run("Consulter les nouvelles générales du marché.")
+        self.assertEqual(news_calls[0][0:3], ("market", "AAA-EUR", None))
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["research_status"], "partial")
+        self.assertEqual(result["conclusion"]["candidates"][0]["status"], "partial")
+        self.assertEqual(
+            result["conclusion"]["candidates"][0]["status_adjustment_reason"],
+            "execution_or_source_coverage_incomplete",
+        )
+        self.assertIn("news:general:AAA-EUR:article:article-1", result["fact_ledger"])
+        self.assertIn("news:general:AAA-EUR:source:feed-two", result["missing_ledger"])
+        self.assertIn(
+            "news:general:AAA-EUR:article:article-1",
+            result["conclusion"]["candidates"][0]["evidence_classes"]["reported_source_claims"],
+        )
+        self.assertEqual(
+            result["conclusion"]["candidates"][0]["evidence_classes"]["market_observations"], []
+        )
+        article_fact = result["fact_ledger"]["news:general:AAA-EUR:article:article-1"]["value"]
+        self.assertEqual(article_fact["search_scope"], "general_market_context")
+        self.assertEqual(article_fact["asset_attribution"], "not_established")
+        self.assertFalse(result["financial_action_executed"])
+
+    def test_gnews_is_opt_in_and_runner_executes_only_requested_read_only_tool(self):
+        calls = []
+
+        def gnews_fn(scope, market, identity, remaining):
+            calls.append((scope, market, identity))
+            return {
+                "provider": "gnews_api",
+                "scope": scope,
+                "query_id": "gnews-query-01",
+                "search_result_status": "no_results_in_requested_window",
+                "articles": [],
+                "excluded_articles": [],
+                "duplicate_groups": [],
+                "coverage": {"status": "partial_single_provider"},
+                "limits": {"free_plan_delay_hours": 12, "article_pages_fetched": False},
+                "quota": {"research_requests_used": 1, "daily_requests_used": 1},
+                "collected_at": "2026-11-09T10:00:00Z",
+            }
+
+        fake = FakeOllama(
+            [
+                call("get_gnews_market_news", {"market": "AAA-EUR"}),
+                call(
+                    "finish_research",
+                    {
+                        "candidates": [
+                            {
+                                "market": "AAA-EUR",
+                                "fact_refs": ["scan:AAA-EUR:score"],
+                                "missing_refs": [],
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        runner, _ = self.make_runner(fake, scan_data=scan(), gnews_fn=gnews_fn)
+        result = runner.run("Examiner le contexte crypto public.")
+        self.assertEqual(calls, [("market", "AAA-EUR", None)])
+        first_turn_tools = {item["function"]["name"] for item in fake.requests[0][1]}
+        self.assertIn("get_gnews_market_news", first_turn_tools)
+        self.assertNotIn("get_gnews_market_news", ALLOWED_TOOLS)
+        self.assertIn("news:gnews:AAA-EUR:coverage", result["missing_ledger"])
+        self.assertFalse(result["financial_action_executed"])
+
+    def test_gnews_cli_requires_explicit_free_plan_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "research.json"
+            args = build_parser().parse_args(
+                ["research", "--objective", "Lire le contexte.", "--json", str(output)]
+            )
+            self.assertFalse(args.enable_gnews)
+            self.assertFalse(args.confirm_gnews_free_plan)
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "research",
+                        "--objective",
+                        "Lire le contexte.",
+                        "--json",
+                        str(output),
+                        "--enable-gnews",
+                    ]
+                )
+            self.assertEqual(exit_code, 1)
+            self.assertIn("--confirm-gnews-free-plan", stdout.getvalue())
+            self.assertFalse(output.exists())
+
+    def test_context_exhaustion_overrides_model_complete_and_hides_exhaustive_claim(self):
+        complete_response = {
+            "message": {
+                "content": __import__("json").dumps(
+                    {
+                        "candidates": [
+                            {
+                                "market": "AAA-EUR",
+                                "status": "complete",
+                                "interpretation": "Synthèse non certifiée.",
+                                "conclusion": "A comprehensive and complete review.",
+                            }
+                        ]
+                    }
+                ),
+                "tool_calls": [],
+            },
+            "generation": {"eval_count": 20},
+            "duration_ms": 10,
+            "think": False,
+            "done_reason": "stop",
+            "request_bytes": 100,
+            "response_bytes": 200,
+            "timeout_seconds": 30,
+            "num_ctx": 8192,
+        }
+        fake = FakeOllama(
+            [call("get_fundamentals", {"market": "AAA-EUR"})],
+            conclusion_response=complete_response,
+        )
+        original = research_module._budgeted_research_context
+        calls = 0
+
+        def exhaust_after_one_turn(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return None if calls > 1 else original(*args, **kwargs)
+
+        runner, _ = self.make_runner(fake)
+        with patch(
+            "crypto_market_agents.trading.autonomous_research._budgeted_research_context",
+            side_effect=exhaust_after_one_turn,
+        ):
+            result = runner.run("Recherche avec conclusion partielle.")
+        candidate = result["conclusion"]["candidates"][0]
+        self.assertEqual(result["stop_reason"], "context_budget_exhausted")
+        self.assertEqual(result["status"], "partial")
+        self.assertTrue(result["conclusion"]["partial"])
+        self.assertEqual(candidate["status"], "partial")
+        self.assertEqual(candidate["model_reported_status"], "complete")
+        self.assertEqual(
+            candidate["status_adjustment_reason"], "research_stop:context_budget_exhausted"
+        )
+        self.assertIn("Bilan partiel", candidate["conclusion"])
+        self.assertIn("comprehensive", candidate["model_generated_conclusion_unverified"])
+        displayed = result["candidates"][0]
+        self.assertEqual(displayed["conclusion_status"], "partial")
+        self.assertIn("Bilan partiel", displayed["research_conclusion"])
+        self.assertIn("comprehensive", displayed["model_generated_conclusion_unverified"])
+
+    def test_empty_news_search_records_limited_observation_not_event_absence(self):
+        def no_news(scope, market, identity, remaining):
+            return {
+                "scope": "market",
+                "search_scope": "general_market_context",
+                "tool_invocation_market": market,
+                "asset_attribution": "not_established",
+                "search_window": {"requested_days": 30, "published_after": "2026-10-10T00:00:00Z"},
+                "dates_obtained": {"oldest_publication_at": None, "newest_publication_at": None},
+                "search_result_status": "no_feed_items_observed_within_requested_window",
+                "event_absence_established": False,
+                "coverage": {
+                    "status": "configured_sources_checked",
+                    "coverage_missing": [],
+                },
+                "articles": [],
+                "coverage_groups": [],
+                "source_results": [
+                    {
+                        "source_id": "feed-one",
+                        "publisher": "Publisher",
+                        "status": "success",
+                        "article_count": 0,
+                    },
+                    {
+                        "source_id": "feed-two",
+                        "publisher": "Publisher Two",
+                        "status": "success",
+                        "article_count": 0,
+                    },
+                ],
+                "collected_at": "2026-11-09T10:00:00+00:00",
+            }
+
+        fake = FakeOllama(
+            [
+                call("get_market_news", {"market": "AAA-EUR"}),
+                call(
+                    "finish_research",
+                    {
+                        "candidates": [
+                            {
+                                "market": "AAA-EUR",
+                                "fact_refs": [],
+                                "missing_refs": ["news:general:AAA-EUR:coverage"],
+                                "required_missing_refs": [],
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        runner, _ = self.make_runner(fake, news_fn=no_news)
+        result = runner.run("Chercher du contexte général récent.")
+        missing = result["missing_ledger"]["news:general:AAA-EUR:coverage"]
+        self.assertEqual(missing["reason"], "no_feed_items_observed_within_requested_window")
+        event = next(event for event in result["events"] if event.get("kind") == "tool_call")
+        self.assertFalse(event["result_summary"]["event_absence_established"])
+        self.assertEqual(
+            event["result_summary"]["relevance_status"],
+            "no_feed_items_observed_within_requested_window",
+        )
+
+    def test_asset_news_identity_gate_and_history_remain_available(self):
+        requested_identity = []
+        history_calls = []
+
+        def news_fn(scope, market, identity, remaining):
+            requested_identity.append(identity)
+            self.assertEqual(scope, "asset")
+            return {
+                "scope": "asset",
+                "identity_status": identity["status"],
+                "identity_reason": "verified_identity_required",
+                "articles": [],
+                "coverage_groups": [],
+                "source_results": [],
+                "collected_at": "2026-11-09T10:00:00+00:00",
+                "identity_check_execution": "fundamentals_executed_for_identity",
+            }
+
+        fake = FakeOllama(
+            [
+                call("get_asset_news", {"market": "AAA-EUR"}),
+                call("analyze_candidate", {"market": "AAA-EUR"}),
+                call(
+                    "finish_research",
+                    {
+                        "candidates": [
+                            {
+                                "market": "AAA-EUR",
+                                "fact_refs": ["history:AAA-EUR:returns_pct.24h"],
+                                "missing_refs": ["news:asset:AAA-EUR:identity"],
+                            }
+                        ]
+                    },
+                ),
+            ]
+        )
+        runner, _ = self.make_runner(
+            fake,
+            news_fn=news_fn,
+            fundamentals_fn=lambda market, candidate, remaining: fundamentals(
+                market, identity="unresolved"
+            ),
+            analyze_fn=lambda *args: history_calls.append(args[0]) or history(args[0]),
+        )
+        result = runner.run("Chercher des informations sur cet actif.")
+        self.assertEqual(requested_identity[0]["status"], "unresolved")
+        self.assertEqual(history_calls, ["AAA-EUR"])
+        news_event = next(
+            event
+            for event in result["events"]
+            if event.get("kind") == "tool_call"
+            and event.get("request", {}).get("tool") == "get_asset_news"
+        )
+        self.assertEqual(news_event["identity_status"], "unresolved")
+        self.assertIn("news:asset:AAA-EUR:identity", result["missing_ledger"])
+        self.assertIn("history:AAA-EUR:returns_pct.24h", result["fact_ledger"])
 
     def test_forbidden_tool_and_invalid_arguments_never_execute(self):
         for bad_call, expected in (
@@ -812,6 +1172,253 @@ class AutonomousResearchTests(unittest.TestCase):
         self.assertIn("fundamentals:ASSET-00-long:description", context["compacted_refs"])
         self.assertLessEqual(context["estimated_prompt_tokens"] + 1200 + 4096, 8192)
 
+    def test_news_context_uses_compact_reference_index_and_omits_full_excerpt(self):
+        ref = "news:general:AAA-EUR:article:story-1"
+        facts = {
+            ref: {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "collected_at": "2026-11-09T10:00:00+00:00",
+                "source_at": "2026-11-08T10:00:00+00:00",
+                "value": {
+                    "evidence_class": "reported_source_content",
+                    "search_scope": "general_market_context",
+                    "asset_attribution": "not_established",
+                    "relevance_status": "general_context_relevance_not_established",
+                    "freshness_status": "within_requested_window",
+                    "title": "Regulatory update",
+                    "publisher": "Publisher",
+                    "source_id": "feed-one",
+                    "source_type": "official_announcement",
+                    "published_at": "2026-11-08T10:00:00+00:00",
+                    "publication_date_status": "available",
+                    "collected_at": "2026-11-09T10:00:00+00:00",
+                    "excerpt": "secret-full-excerpt-" + ("x" * 1000),
+                    "url": "https://news.example/story",
+                    "coverage_group_id": "group-1",
+                },
+            }
+        }
+        context = _budgeted_research_context(
+            {"role": "system", "content": "read-only"},
+            "Check recent general news.",
+            ["AAA-EUR"],
+            {"AAA-EUR": scan()["candidates"][0]},
+            set(),
+            {"max_candidates": 5},
+            facts,
+            {},
+            {},
+            feedback=None,
+            num_ctx=8192,
+            num_predict=512,
+            safety_margin=512,
+        )
+        payload = __import__("json").loads(context["messages"][-1]["content"])
+        item = next(
+            row for row in payload["verified_observation_registry"] if row["reference"] == ref
+        )
+        self.assertEqual(item["value"]["search_scope"], "general_market_context")
+        self.assertEqual(item["value"]["asset_attribution"], "not_established")
+        self.assertLessEqual(len(item["value"]["excerpt"]), 120)
+        self.assertNotEqual(item["value"]["excerpt"], facts[ref]["value"]["excerpt"])
+        self.assertIn(ref, context["compacted_refs"])
+
+    def test_research_context_drops_old_and_singleton_news_without_losing_report_refs(self):
+        current_ref = "news:general:AAA-EUR:article:current"
+        old_ref = "news:general:AAA-EUR:article:old"
+        group_ref = "news:general:AAA-EUR:coverage:singleton"
+        facts = {
+            current_ref: {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "value": {
+                    "freshness_status": "within_requested_window",
+                    "search_scope": "general_market_context",
+                    "asset_attribution": "not_attributed_to_asset",
+                    "title": "Current macro headline",
+                    "publisher": "SEC",
+                    "published_at": "2026-11-08T10:00:00+00:00",
+                    "excerpt": "short",
+                },
+            },
+            old_ref: {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "value": {
+                    "freshness_status": "outside_requested_window",
+                    "title": "Old headline",
+                    "publisher": "Fed",
+                    "published_at": "2026-10-01T10:00:00+00:00",
+                },
+            },
+            group_ref: {
+                "market": "AAA-EUR",
+                "source": "rss_title_similarity_grouping",
+                "value": {
+                    "article_refs": ["old"],
+                    "repeated_coverage_is_not_independent_confirmation": False,
+                },
+            },
+        }
+        prior = {
+            "execution_status": "success",
+            "facts_obtained_count": 2,
+            "unavailable_field_count": 0,
+            "search_scope": "general_market_context",
+            "current_article_count": 1,
+            "outside_window_article_count": 1,
+            "asset_specific_coverage_status": "no_asset_specific_source_configured_or_consulted",
+            "available_fact_refs": [current_ref, old_ref],
+            "missing_refs": [],
+        }
+        context = _budgeted_research_context(
+            {"role": "system", "content": "rules"},
+            "Review recent market context.",
+            ["AAA-EUR"],
+            {"AAA-EUR": scan()["candidates"][0]},
+            {"AAA-EUR"},
+            {"max_candidates": 5},
+            facts,
+            {},
+            {"AAA-EUR": {"get_market_news": prior}},
+            feedback=None,
+            num_ctx=8192,
+            num_predict=1200,
+            safety_margin=512,
+        )
+        payload = __import__("json").loads(context["messages"][-1]["content"])
+        refs = [row["reference"] for row in payload["verified_observation_registry"]]
+        operation = payload["previous_tool_results"][0]
+        self.assertIn(current_ref, refs)
+        self.assertNotIn(old_ref, refs)
+        self.assertNotIn(group_ref, refs)
+        self.assertIn(old_ref, context["omitted_refs"])
+        self.assertIn(group_ref, context["omitted_refs"])
+        self.assertNotIn("available_fact_refs", operation)
+        self.assertNotIn("missing_refs", operation)
+        self.assertEqual(
+            operation["asset_specific_coverage_status"],
+            "no_asset_specific_source_configured_or_consulted",
+        )
+        decomposition = context["context_decomposition"]
+        self.assertEqual(decomposition["chat_history_messages_retained"], 0)
+        self.assertGreater(decomposition["component_bytes"]["tool_schemas"], 0)
+        self.assertGreater(decomposition["component_bytes"]["news"], 0)
+        self.assertTrue(decomposition["estimate_is_local_not_tokenizer_count"])
+
+    def test_news_conclusion_index_fits_reserved_context_without_raw_urls(self):
+        facts = {}
+        refs = []
+        for index in range(20):
+            ref = f"news:general:AAA-EUR:article:story-{index}"
+            refs.append(ref)
+            facts[ref] = {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "collected_at": "2026-11-09T10:00:00+00:00",
+                "source_at": "2026-11-08T10:00:00+00:00",
+                "value": {
+                    "evidence_class": "reported_source_content",
+                    "search_scope": "general_market_context",
+                    "asset_attribution": "not_established",
+                    "relevance_status": "general_context_relevance_not_established",
+                    "freshness_status": "within_requested_window",
+                    "title": f"Regulatory headline {index} " + ("headline " * 15),
+                    "publisher": "Publisher",
+                    "source_id": "feed-one",
+                    "source_type": "official_announcement",
+                    "coverage_domain": "regulatory",
+                    "published_at": "2026-11-08T10:00:00+00:00",
+                    "publication_date_status": "available",
+                    "collected_at": "2026-11-09T10:00:00+00:00",
+                    "excerpt": "A long article description " * 30,
+                    "url": f"https://news.example/story-{index}",
+                },
+            }
+        context = _budgeted_conclusion_context(
+            "Evaluate recent macro context.",
+            [
+                {
+                    "market": "AAA-EUR",
+                    "fact_refs": refs,
+                    "missing_refs": [],
+                    "required_missing_refs": [],
+                }
+            ],
+            facts,
+            {},
+            max_candidates=5,
+            num_ctx=8192,
+            num_predict=600,
+            safety_margin=512,
+        )
+        self.assertIsNotNone(context)
+        item = context["messages"][-1]["content"]
+        self.assertNotIn("https://news.example/story-", item)
+        self.assertIn("omitted_from_context", item)
+        self.assertLessEqual(context["estimated_prompt_tokens"] + 600 + 512, 8192)
+
+    def test_conclusion_separates_out_of_window_news_and_reports_source_scope(self):
+        refs = [
+            "news:general:AAA-EUR:article:current",
+            "news:general:AAA-EUR:article:old",
+            "news:general:AAA-EUR:coverage:singleton",
+            "news:general:AAA-EUR:article:undated",
+        ]
+        facts = {
+            refs[0]: {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "value": {"freshness_status": "within_requested_window", "title": "Recent"},
+            },
+            refs[1]: {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "value": {"freshness_status": "older_than_requested_window", "title": "Old"},
+            },
+            refs[2]: {
+                "market": "AAA-EUR",
+                "source": "rss_title_similarity_grouping",
+                "value": {"repeated_coverage_is_not_independent_confirmation": False},
+            },
+            refs[3]: {
+                "market": "AAA-EUR",
+                "source": "rss_feed",
+                "value": {
+                    "freshness_status": "unknown_or_invalid_publication_date",
+                    "title": "Undated",
+                },
+            },
+        }
+        context = research_module._budgeted_conclusion_context(
+            "Summarize.",
+            [{"market": "AAA-EUR", "fact_refs": refs, "missing_refs": []}],
+            facts,
+            {},
+            max_candidates=5,
+            num_ctx=8192,
+            num_predict=600,
+            safety_margin=512,
+        )
+        payload = __import__("json").loads(context["messages"][-1]["content"])
+        candidate = payload["verified_evidence_registry"][0]
+        fact_refs = [item["reference"] for item in candidate["facts"]]
+        self.assertEqual(fact_refs, [refs[0]])
+        self.assertEqual(context["omitted_refs"], sorted(refs[1:]))
+        self.assertEqual(candidate["news_coverage"]["current_window_article_count"], 1)
+        self.assertEqual(
+            candidate["news_coverage"]["outside_window_articles_separated_from_current"], 1
+        )
+        self.assertEqual(
+            candidate["news_coverage"]["unknown_publication_date_articles_not_treated_as_current"],
+            1,
+        )
+        self.assertEqual(
+            candidate["news_coverage"]["asset_specific_source_coverage"],
+            "no_asset_specific_source_configured_or_consulted",
+        )
+
     def test_truncated_model_turn_never_executes_partial_tool_request(self):
         class TruncatedOllama(FakeOllama):
             def chat_with_tools(self, messages, tools, **kwargs):
@@ -1040,7 +1647,7 @@ class AutonomousResearchTests(unittest.TestCase):
 
             def run(self, objective):
                 return {
-                    "schema_version": "autonomous-research.v3",
+                    "schema_version": "autonomous-research.v6",
                     "status": "partial",
                     "stop_reason": "ollama_error",
                     "objective": objective,

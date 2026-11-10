@@ -6,6 +6,8 @@ import os
 import socket
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from io import BytesIO
 import hashlib
@@ -13,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from crypto_market_agents.logging_utils import get_logger
 from crypto_market_agents.security import redact_text, redact_url
@@ -23,6 +25,48 @@ TRANSIENT_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 DEFAULT_CACHE_BACKEND = "memory"
 DEFAULT_CACHE_DIR = ".cache/crypto-market-agents"
 SUPPORTED_CACHE_BACKENDS = {"memory", "file"}
+_ACTIVE_REQUEST_BUDGET: ContextVar[dict[str, int] | None] = ContextVar(
+    "active_external_http_request_budget", default=None
+)
+
+
+class HTTPRequestBudgetExceeded(RuntimeError):
+    """The current orchestration stage exhausted its raw HTTP request allowance."""
+
+
+@contextmanager
+def http_request_budget(limit: int):
+    """Count network attempts (including retries), excluding cache hits, in this context."""
+    if type(limit) is not int or limit < 0:
+        raise ValueError("http_request_budget_invalid")
+    counter = {"limit": limit, "used": 0}
+    token = _ACTIVE_REQUEST_BUDGET.set(counter)
+    try:
+        yield counter
+    finally:
+        _ACTIVE_REQUEST_BUDGET.reset(token)
+
+
+def _consume_http_request_budget() -> None:
+    counter = _ACTIVE_REQUEST_BUDGET.get()
+    if counter is None:
+        return
+    if counter["used"] >= counter["limit"]:
+        raise HTTPRequestBudgetExceeded("external_http_request_budget_exhausted")
+    counter["used"] += 1
+
+
+class _BudgetedRedirectHandler(HTTPRedirectHandler):
+    """Count each followed redirect as a separate network request."""
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        _consume_http_request_budget()
+        return super().redirect_request(request, file_pointer, code, message, headers, new_url)
+
+
+def budgeted_urlopen(request: Request, *, timeout: float):
+    """Default urllib opener that counts followed redirects in an active budget."""
+    return build_opener(_BudgetedRedirectHandler()).open(request, timeout=timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +284,7 @@ def send_request_with_retries(
     cache: CacheBackend | None = None,
     sleep: Callable[[float], None] = time.sleep,
     logger_name: str = __name__,
+    error_body_max_bytes: int | None = None,
 ) -> HTTPResponse:
     """Send an HTTP request with limited retry, backoff, and optional GET cache."""
 
@@ -258,6 +303,7 @@ def send_request_with_retries(
     last_response: HTTPResponse | None = None
     for attempt in range(selected_settings.max_retries + 1):
         try:
+            _consume_http_request_budget()
             with opener(request, timeout=timeout_seconds) as response:
                 status_code = response_status(response)
                 body = read_text(response)
@@ -274,7 +320,11 @@ def send_request_with_retries(
                 exc.close()
                 continue
             try:
-                body = exc.read()
+                body = (
+                    exc.read(error_body_max_bytes + 1)
+                    if error_body_max_bytes is not None
+                    else exc.read()
+                )
             except OSError:
                 body = b""
             url, status, reason, headers = exc.url, exc.code, exc.msg, exc.headers

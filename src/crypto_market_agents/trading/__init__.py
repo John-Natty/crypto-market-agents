@@ -3,6 +3,13 @@
 from .engine import PaperEngine
 from .models import Decision, Portfolio, Quote, RiskConfig, TradingError
 from .store import PaperStore
+from .multi_asset import (
+    MultiAssetOrder,
+    MultiAssetPaperEngine,
+    MultiAssetPaperStore,
+    MultiAssetPortfolio,
+    MultiAssetRiskConfig,
+)
 
 __all__ = [
     "Decision",
@@ -12,4 +19,9 @@ __all__ = [
     "Quote",
     "RiskConfig",
     "TradingError",
+    "MultiAssetOrder",
+    "MultiAssetPaperEngine",
+    "MultiAssetPaperStore",
+    "MultiAssetPortfolio",
+    "MultiAssetRiskConfig",
 ]

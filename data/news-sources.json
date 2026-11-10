@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "feeds": [
+    {
+      "id": "sec-press-releases",
+      "publisher": "U.S. Securities and Exchange Commission",
+      "url": "https://www.sec.gov/rss/news/press.xml",
+      "source_type": "official_announcement",
+      "coverage_domain": "regulatory",
+      "scopes": ["market", "asset"]
+    },
+    {
+      "id": "federal-reserve-press-releases",
+      "publisher": "Federal Reserve Board",
+      "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+      "source_type": "official_announcement",
+      "coverage_domain": "macro",
+      "scopes": ["market", "asset"]
+    },
+    {
+      "id": "bitvavo-api-release-notes",
+      "publisher": "Bitvavo API Documentation",
+      "url": "https://docs.bitvavo.com/releases/rss.xml",
+      "source_type": "official_announcement",
+      "coverage_domain": "platform",
+      "scopes": ["market"]
+    }
+  ]
+}

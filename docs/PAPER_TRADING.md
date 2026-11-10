@@ -83,6 +83,64 @@ distincte des soldes persistants. Arrêter le serveur de suivi ne stoppe pas le
 moteur lancé dans l'autre terminal. Sans `--state`, la commande `dashboard`
 conserve son accueil historique des rapports.
 
+## Portefeuille fictif multi-actifs
+
+`paper-multi` ajoute un portefeuille JSON distinct (`paper-multiasset.v2`; les
+états v1 restent lisibles et ne sont pas migrés automatiquement). Il
+réutilise les types `Quote`, les contrôles Decimal et les hypothèses de frais,
+glissement et minimum du moteur papier mono-actif, mais conserve sa propre
+réserve partagée fixe de **150 EUR**, son journal, ses positions
+`plateforme|marché` et sa politique de risque versionnée. L'initialisation
+refuse un chemin existant; aucun état mono-actif n'est converti ou écrasé.
+
+Les opérations du portefeuille restent des simulations et ne transmettent aucun
+ordre. Les cotations peuvent être saisies explicitement ou actualisées depuis
+les endpoints publics Bitvavo, sans compte ni clé :
+
+```bash
+crypto-market-agents paper-multi init --state paper/multiasset.json
+crypto-market-agents paper-multi trade --state paper/multiasset.json \
+  --action buy --platform mock --market BTC-EUR \
+  --bid 100 --ask 100.05 --amount-eur 60 --decision-id btc-cycle-1
+crypto-market-agents paper-multi trade --state paper/multiasset.json \
+  --action buy --platform mock --market ETH-EUR \
+  --bid 50 --ask 50.05 --amount-eur 60 --decision-id eth-cycle-1
+crypto-market-agents paper-multi status --state paper/multiasset.json --json
+crypto-market-agents paper-multi refresh --state paper/multiasset.json
+```
+
+Les deux budgets d'achat sont prélevés de la même réserve; les frais sont inclus
+dans le budget demandé. Une dépense supérieure au disponible est rejetée. La
+commande `trade --action sell` demande une quantité, ce qui permet une vente
+partielle au coût de revient moyen. `refresh` lit les marchés et carnets publics
+Bitvavo pour les positions ouvertes `bitvavo|...`. Il écrit les observations
+dans le sidecar distinct `<state>.quotes-v1.json`, conserve la dernière cotation
+connue en cas d'échec et ne modifie ni quantité, ni solde, ni journal. Chaque
+erreur est isolée par position. Le ticker public ne fournit pas d'horodatage de
+transaction : l'heure enregistrée est celle de réception locale. Les contraintes
+du marché (minimums et pas de quantité) sont conservées avec le cours.
+
+`status` valorise les cotations à l'heure courante; après expiration du délai,
+ou si une cotation manque, la valorisation totale et l'exposition globale sont
+explicitement incomplètes. La dernière cotation et sa date restent visibles,
+mais ne remplacent pas la valeur actuelle par le coût de revient. Un nouvel achat
+est refusé tant que l'exposition totale ne peut être contrôlée. Une vente de
+réduction reste possible avec un cours valide pour la position concernée. Les
+exports JSON conservent les montants Decimal complets; seul l'affichage humain
+en EUR est arrondi à deux décimales. Le budget engagé (coût de revient) est
+distinct de la valeur actuelle, de l'exposition de marché et des résultats
+réalisé/non réalisé.
+
+La politique v1 borne le montant par opération, l'exposition totale et chaque
+position (exposition mesurée par son coût de revient, frais d'achat inclus), en
+plus du taux de frais, du glissement, du spread, de l'âge de cours et des
+minimums de marché. Les paramètres sont fixés à la création et persistés
+avec leur version. Les positions et le journal ne sont pas réinitialisés au
+changement de date. Le verrou de fichier et le remplacement atomique protègent
+les écritures; les identifiants de décision rendent les reprises idempotentes.
+Ce moteur reste sans levier, découvert, vente à découvert, connexion authentifiée
+ou lien avec `research` / `review-research`.
+
 ### Discuter avec l’agent
 
 La discussion est directement intégrée à la colonne de droite. Le bouton

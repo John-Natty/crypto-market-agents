@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import json
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from crypto_market_agents.http_utils import _consume_http_request_budget, budgeted_urlopen
 
 
 class CandleClientError(RuntimeError):
@@ -15,7 +17,7 @@ class CandleClientError(RuntimeError):
 
 class BitvavoCandleClient:
     def __init__(self, *, opener=None, now_provider=None, timeout=10):
-        self.opener = opener or urlopen
+        self.opener = opener or budgeted_urlopen
         self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self.timeout = timeout
 
@@ -30,6 +32,7 @@ class BitvavoCandleClient:
             headers={"Accept": "application/json"},
         )
         try:
+            _consume_http_request_budget()
             with self.opener(request, timeout=self.timeout) as response:
                 raw = response.read(2_000_001)
                 if len(raw) > 2_000_000:
